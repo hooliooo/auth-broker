@@ -382,6 +382,10 @@ pub enum RegistryError {
     /// Two sites share an origin.
     #[error("site '{0}': origin is already used by another site")]
     DuplicateOrigin(String),
+    /// Another site of the same kind answers to the same `Host` header, e.g. `http://x` and
+    /// `https://x`: the header has no scheme, so the edge could not tell them apart.
+    #[error("site '{0}': another site of its kind has the same host and port")]
+    SharedHost(String),
     /// A kind's edge key is malformed.
     #[error("app '{0}': edge_public_key must be 'ed25519:' followed by 32 bytes in base64url")]
     InvalidPublicKey(String),
@@ -445,6 +449,24 @@ fn host_key(app_id: &str, host: &str) -> String {
     format!("{app_id}\n{host}")
 }
 
+/// Every [`Registry::by_host`] key `site` answers to: its host with its port, and also without
+/// it when the port is its scheme's default, as browsers send `Host`. None for a native
+/// installation. Validation and the index both use this, so they cannot disagree.
+fn host_keys(site: &Site) -> Vec<String> {
+    let Some(origin) = site.origin() else {
+        return Vec::new();
+    };
+    // The URL parser lowercases the host already.
+    let host = origin.host_str().unwrap_or_default();
+    let port = origin.port_or_known_default().unwrap_or_default();
+    let mut keys = vec![host_key(&site.app_id, &format!("{host}:{port}"))];
+    let default_port = if origin.scheme() == "https" { 443 } else { 80 };
+    if port == default_port {
+        keys.push(host_key(&site.app_id, host));
+    }
+    keys
+}
+
 /// A key's id: the first 16 characters of the base64url SHA-256 of its 32 bytes. Signed requests
 /// name it, so the hub verifies with one key however many an installation has.
 pub fn key_id(key: &[u8; 32]) -> String {
@@ -467,6 +489,8 @@ impl Registry {
             HashSet::new(),
             HashSet::new(),
         );
+        // Every by_host key, so each names exactly one site.
+        let mut hosts = HashSet::new();
         for (name, text) in documents {
             let document: Document = serde_json::from_str(text)
                 .map_err(|e| RegistryError::Json(name.to_owned(), e.to_string()))?;
@@ -492,6 +516,9 @@ impl Registry {
                 {
                     return Err(RegistryError::DuplicateOrigin(site.id));
                 }
+                if !host_keys(&site).into_iter().all(|key| hosts.insert(key)) {
+                    return Err(RegistryError::SharedHost(site.id));
+                }
                 if !site
                     .keys()
                     .iter()
@@ -507,21 +534,12 @@ impl Registry {
         Ok(registry)
     }
 
-    /// Builds the lookup indexes. A web-app installation is found by its host with its port, and
-    /// also without it when the port is its scheme's default, as browsers send `Host`.
+    /// Builds the lookup indexes, after validation has made every id and host key unique.
     fn index(&mut self) {
         for (i, site) in self.sites.iter().enumerate() {
             self.by_id.insert(site.id.clone(), i);
-            if let Some(origin) = site.origin() {
-                // The URL parser lowercases the host already.
-                let host = origin.host_str().unwrap_or_default();
-                let port = origin.port_or_known_default().unwrap_or_default();
-                self.by_host
-                    .insert(host_key(&site.app_id, &format!("{host}:{port}")), i);
-                let default_port = if origin.scheme() == "https" { 443 } else { 80 };
-                if port == default_port {
-                    self.by_host.insert(host_key(&site.app_id, host), i);
-                }
+            for key in host_keys(site) {
+                self.by_host.insert(key, i);
             }
         }
     }
@@ -1280,6 +1298,33 @@ mod tests {
         }
         assert_eq!(r.get("plant-b").unwrap().id, "plant-b");
         assert!(r.get("plant-z").is_none());
+    }
+
+    #[test]
+    fn given_two_sites_of_a_kind_the_edge_cannot_tell_apart_then_the_set_is_refused() {
+        // Different origins, same Host header: it carries no scheme.
+        for (first, second) in [
+            ("http://plant.localhost", "https://plant.localhost"),
+            ("https://plant.localhost", "http://plant.localhost:443"),
+            ("http://plant.localhost:80", "http://PLANT.localhost"),
+        ] {
+            let result = one(&[site("first", first), site("second", second)]);
+            let expected = if first.ends_with(":80") {
+                // The parser drops a default port, so these are the same origin outright.
+                RegistryError::DuplicateOrigin("second".into())
+            } else {
+                RegistryError::SharedHost("second".into())
+            };
+            assert_eq!(result.unwrap_err(), expected, "{first} and {second}");
+        }
+        // The same host at another port, or in another kind, is another site.
+        assert!(
+            one(&[
+                site("first", "http://plant.localhost"),
+                site("second", "http://plant.localhost:8080")
+            ])
+            .is_ok()
+        );
     }
 
     /// Measures lookups and signature checks at tens of thousands of installations and keys:
