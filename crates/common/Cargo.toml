@@ -1,0 +1,27 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Shared building blocks for the auth broker: request signing, the site registry, client authentication, cookies, CSRF, PKCE, sealing and proxy hygiene."
+
+[features]
+default = ["metrics"]
+# Prometheus metrics on their own address; without it every recording function is a no-op.
+metrics = []
+# A counting global allocator whose totals appear on the metrics page; for measurements only.
+alloc-stats = ["metrics"]
+
+[dependencies]
+axum.workspace       = true
+base64.workspace     = true
+jsonwebtoken.workspace = true
+oidc                 = { path = "../oidc" }
+reqwest.workspace    = true
+ring.workspace       = true
+serde.workspace      = true
+serde_json.workspace = true
+subtle.workspace     = true
+thiserror.workspace  = true
+tokio.workspace      = true
+tracing.workspace    = true

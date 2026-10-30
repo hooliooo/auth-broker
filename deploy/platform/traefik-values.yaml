@@ -1,0 +1,28 @@
+# Traefik as the ingress controller, standing in for the cluster's ingress in production. It
+# serves standard Ingress resources (class "traefik") and terminates TLS with the certificates
+# cert-manager issues.
+service:
+  type: NodePort
+ingressClass:
+  enabled: true
+  isDefaultClass: true
+providers:
+  kubernetesIngress:
+    enabled: true
+ports:
+  web:
+    nodePort: 30080
+    # Plain HTTP only redirects to HTTPS.
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    nodePort: 30443
+    # readTimeout bounds reading a whole request, body included (default 60s), so it caps how
+    # long an upload through the BFF may take. Keep it in line with the production ingress.
+    transport:
+      respondingTimeouts:
+        readTimeout: 10m

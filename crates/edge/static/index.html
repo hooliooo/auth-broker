@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Installation edge</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; }
+  button { font: inherit; padding: .4rem .9rem; margin: .2rem .3rem .2rem 0; }
+  pre { background: #f4f4f5; padding: 1rem; overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>Installation edge</h1>
+<p>Demo page served for this installation by its kind's edge. A real installation serves its SPA on this same origin, and sends <code>x-csrf: 1</code> on every call to <code>/api/*</code> and <code>/auth/*</code>, reads included, as this page does.</p>
+<p>
+  <button onclick="location.href = '/auth/login?returnUrl=' + encodeURIComponent('/')">Sign in</button>
+  <button onclick="show(call('/auth/session'))">Who am I</button>
+  <button onclick="show(call('/api/whoami'))">Call API</button>
+  <button onclick="logout()">Sign out</button>
+</p>
+<pre id="out">-</pre>
+<script>
+  // The edge refuses any call to /api/* or /auth/* without this header (its CSRF defense).
+  function call(path, init = {}) {
+    return fetch(path, { ...init, headers: { ...init.headers, "x-csrf": "1" } });
+  }
+  async function show(pending) {
+    const response = await pending;
+    const text = await response.text();
+    document.getElementById("out").textContent = response.status + "\n" + text;
+  }
+  async function logout() {
+    const response = await call("/auth/logout", { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (body.logoutUrl) location.href = body.logoutUrl;
+    else document.getElementById("out").textContent = "signed out";
+  }
+</script>
+</body>
+</html>

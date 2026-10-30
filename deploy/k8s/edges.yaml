@@ -1,0 +1,282 @@
+# One edge per app kind (crates/edge), each serving all its kind's sites under one wildcard
+# name, as the RFC's one certificate per kind: https://<site>.<kind>.broker.localhost. Each edge
+# reads the registry live, signs its calls to the hub with the kind's key (the edge-keys
+# secret, from dev/keys), and reaches the hub at its public address, as browsers do.
+#
+#   inspection   plant-a, plant-b (and the retired and rate-limited test sites); calls the
+#                kind's one central API itself, with each site's token
+#   billing      plant-c; the hub forwards its API calls, the option a kind can still choose
+#   maintenance  plant-d, plant-e; calls each site's own API itself
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-inspection
+  labels: { app: edge-inspection }
+spec:
+  selector: { app: edge-inspection }
+  ports:
+    - name: http
+      port: 5200
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-inspection
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: edge-inspection }
+  template:
+    metadata:
+      labels: { app: edge-inspection }
+    spec:
+      containers:
+        - name: edge
+          image: auth-broker-kind-edge:dev
+          imagePullPolicy: Never
+          args: ["edge"]
+          env:
+            - { name: RUST_LOG, value: "edge=debug,info" }
+            - { name: APP_ID, value: inspection }
+            - { name: HUB_URL, value: "https://hub.broker.localhost" }
+            - { name: EDGE_KEY_FILE, value: /etc/edge/key/edge.key }
+            - { name: REGISTRY_DIR, value: /etc/edge/registry }
+            - { name: REGISTRY_RELOAD_SECS, value: "2" }
+            # The tests send each simulated browser's address in this header, as Cloudflare
+            # would; the ingress passes it through, and only its pods are believed.
+            - { name: CLIENT_IP_HEADER, value: cf-connecting-ip }
+            - { name: TRUSTED_PROXIES, value: 10.244.0.0/16 }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+          ports:
+            - name: http
+              containerPort: 5200
+            - name: metrics
+              containerPort: 9100
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: registry, mountPath: /etc/edge/registry, readOnly: true }
+            - { name: key, mountPath: /etc/edge/key, readOnly: true }
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: registry
+          hostPath:
+            path: /registry
+            type: Directory
+        - name: key
+          secret:
+            secretName: edge-keys
+            items:
+              - { key: edge-inspection.key, path: edge.key }
+        - name: local-ca
+          configMap:
+            name: local-ca
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: edge-inspection
+  annotations:
+    cert-manager.io/cluster-issuer: local-ca
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["*.inspection.broker.localhost"]
+      secretName: edge-inspection-tls
+  rules:
+    - host: "*.inspection.broker.localhost"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: edge-inspection
+                port: { name: http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-billing
+  labels: { app: edge-billing }
+spec:
+  selector: { app: edge-billing }
+  ports:
+    - name: http
+      port: 5200
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-billing
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: edge-billing }
+  template:
+    metadata:
+      labels: { app: edge-billing }
+    spec:
+      containers:
+        - name: edge
+          image: auth-broker-kind-edge:dev
+          imagePullPolicy: Never
+          args: ["edge"]
+          env:
+            - { name: RUST_LOG, value: "edge=debug,info" }
+            - { name: APP_ID, value: billing }
+            - { name: HUB_URL, value: "https://hub.broker.localhost" }
+            - { name: EDGE_KEY_FILE, value: /etc/edge/key/edge.key }
+            - { name: REGISTRY_DIR, value: /etc/edge/registry }
+            - { name: REGISTRY_RELOAD_SECS, value: "2" }
+            # The tests send each simulated browser's address in this header, as Cloudflare
+            # would; the ingress passes it through, and only its pods are believed.
+            - { name: CLIENT_IP_HEADER, value: cf-connecting-ip }
+            - { name: TRUSTED_PROXIES, value: 10.244.0.0/16 }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+          ports:
+            - name: http
+              containerPort: 5200
+            - name: metrics
+              containerPort: 9100
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: registry, mountPath: /etc/edge/registry, readOnly: true }
+            - { name: key, mountPath: /etc/edge/key, readOnly: true }
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: registry
+          hostPath:
+            path: /registry
+            type: Directory
+        - name: key
+          secret:
+            secretName: edge-keys
+            items:
+              - { key: edge-billing.key, path: edge.key }
+        - name: local-ca
+          configMap:
+            name: local-ca
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: edge-billing
+  annotations:
+    cert-manager.io/cluster-issuer: local-ca
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["*.billing.broker.localhost"]
+      secretName: edge-billing-tls
+  rules:
+    - host: "*.billing.broker.localhost"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: edge-billing
+                port: { name: http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-maintenance
+  labels: { app: edge-maintenance }
+spec:
+  selector: { app: edge-maintenance }
+  ports:
+    - name: http
+      port: 5200
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-maintenance
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: edge-maintenance }
+  template:
+    metadata:
+      labels: { app: edge-maintenance }
+    spec:
+      containers:
+        - name: edge
+          image: auth-broker-kind-edge:dev
+          imagePullPolicy: Never
+          args: ["edge"]
+          env:
+            - { name: RUST_LOG, value: "edge=debug,info" }
+            - { name: APP_ID, value: maintenance }
+            - { name: HUB_URL, value: "https://hub.broker.localhost" }
+            - { name: EDGE_KEY_FILE, value: /etc/edge/key/edge.key }
+            - { name: REGISTRY_DIR, value: /etc/edge/registry }
+            - { name: REGISTRY_RELOAD_SECS, value: "2" }
+            # The tests send each simulated browser's address in this header, as Cloudflare
+            # would; the ingress passes it through, and only its pods are believed.
+            - { name: CLIENT_IP_HEADER, value: cf-connecting-ip }
+            - { name: TRUSTED_PROXIES, value: 10.244.0.0/16 }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+          ports:
+            - name: http
+              containerPort: 5200
+            - name: metrics
+              containerPort: 9100
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: registry, mountPath: /etc/edge/registry, readOnly: true }
+            - { name: key, mountPath: /etc/edge/key, readOnly: true }
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: registry
+          hostPath:
+            path: /registry
+            type: Directory
+        - name: key
+          secret:
+            secretName: edge-keys
+            items:
+              - { key: edge-maintenance.key, path: edge.key }
+        - name: local-ca
+          configMap:
+            name: local-ca
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: edge-maintenance
+  annotations:
+    cert-manager.io/cluster-issuer: local-ca
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: ["*.maintenance.broker.localhost"]
+      secretName: edge-maintenance-tls
+  rules:
+    - host: "*.maintenance.broker.localhost"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: edge-maintenance
+                port: { name: http }

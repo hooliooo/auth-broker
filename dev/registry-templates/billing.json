@@ -1,0 +1,19 @@
+{
+  "app": {
+    "id": "billing",
+    "client_id": "hub-billing",
+    "edge_public_key": "@edge-billing@",
+    "api_upstream": "http://api-billing:8081",
+    "api_audience": "billing-api",
+    "scopes": "openid profile email",
+    "required_role": "billing-user"
+  },
+  "sites": [
+    {
+      "enabled": true,
+      "id": "plant-c",
+      "origin": "@origin:plant-c@",
+      "tenant": "customer1"
+    }
+  ]
+}

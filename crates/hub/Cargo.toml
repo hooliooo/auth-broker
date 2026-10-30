@@ -1,0 +1,34 @@
+[package]
+name = "hub"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Central auth hub: the only Keycloak client, holds tokens, serves every registered site's edge."
+
+[features]
+default = ["metrics", "keycloak"]
+# Keycloak as an identity provider (IDENTITY_PROVIDER=keycloak).
+keycloak = ["dep:keycloak"]
+# Prometheus metrics on METRICS_ADDR.
+metrics = ["common/metrics"]
+# Counts heap allocations and shows them on the metrics page; for measurements only.
+alloc-stats = ["metrics", "common/alloc-stats"]
+
+[dev-dependencies]
+keycloak = { path = "../keycloak" }
+
+[dependencies]
+axum.workspace               = true
+base64.workspace             = true
+futures-util                 = "0.3"
+keycloak                     = { path = "../keycloak", optional = true }
+oidc                         = { path = "../oidc" }
+redis                        = { workspace = true, features = ["tokio-comp", "connection-manager"] }
+reqwest                      = { workspace = true, features = ["stream"] }
+serde.workspace              = true
+serde_json.workspace         = true
+common                    = { path = "../common", default-features = false }
+thiserror.workspace          = true
+tokio.workspace              = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true

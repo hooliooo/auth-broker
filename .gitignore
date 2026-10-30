@@ -1,0 +1,8 @@
+/target
+# Local keys and the registry built from them, by dev/generate-dev-keys.sh
+/dev/keys/
+/dev/registry/
+/dev/registry-compose/
+/providers/keycloak/extension/target/
+.env
+.DS_Store

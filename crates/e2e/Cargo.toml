@@ -1,0 +1,29 @@
+[package]
+name = "e2e"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "End-to-end tests for the auth broker against the local cluster (dev/k8s/up.sh); load tests against the docker compose measurement stack."
+
+# The tests only build with `--features e2e`, so a plain `cargo test` never needs the stack.
+[features]
+e2e = []
+# Load and capacity measurements against the measurement stack (docker-compose.perf.yml); run
+# in release mode, alone: they saturate the machine.
+load = []
+
+[dev-dependencies]
+base64.workspace       = true
+jsonwebtoken.workspace = true
+redis                  = { workspace = true, features = ["tokio-comp"] }
+regex.workspace        = true
+reqwest.workspace      = true
+ring.workspace         = true
+hdrhistogram           = "7.5"
+serde_json.workspace   = true
+common              = { path = "../common" }
+tokio.workspace        = true
+# The raw HTTPS request of the path tests, which an HTTP client would normalise.
+rustls                   = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+rustls-platform-verifier = "0.7"
+tokio-rustls             = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }

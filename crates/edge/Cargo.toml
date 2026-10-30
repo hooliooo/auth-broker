@@ -1,0 +1,26 @@
+[package]
+name = "edge"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Per-kind edge: the browser's first-party origin for every site of one app kind; signs for each site to the hub."
+
+[features]
+default = ["metrics"]
+# Prometheus metrics on METRICS_ADDR.
+metrics = ["common/metrics"]
+# Counts heap allocations and shows them on the metrics page; for measurements only.
+alloc-stats = ["metrics", "common/alloc-stats"]
+
+[dependencies]
+axum.workspace               = true
+base64.workspace             = true
+futures-util                 = "0.3"
+reqwest                      = { workspace = true, features = ["stream"] }
+serde.workspace              = true
+serde_json.workspace         = true
+common                    = { path = "../common", default-features = false }
+thiserror.workspace          = true
+tokio.workspace              = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true

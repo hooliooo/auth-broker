@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+# The auth broker and the auth hub: one hub for every kind of on-premise application, an edge
+# per site, the library both share, and their tests. `oidc` is auth-api's token
+# verification crate; `test-helpers` is the BFF's e2e helper service.
+members = [
+  "crates/oidc",
+  "crates/common",
+  "crates/e2e",
+  "crates/test-api",
+  "crates/edge",
+  "crates/hub",
+  "crates/keycloak",
+  "crates/test-helpers",
+]
+
+[workspace.dependencies]
+async-trait            = "0.1.92"
+axum                   = { version = "0.8.9", features = ["json", "tracing"] }
+base64                 = { version = "0.23.1" }
+# aws-lc: the same crypto library rustls already uses; avoids the pure-Rust `rsa` crate.
+jsonwebtoken           = { version = "11.1.0", features = ["aws_lc_rs"] }
+kern                   = { version = "0.1.0", git = "https://github.com/hooliooo/kern.git", features = [
+  "axum",
+  "event_bus",
+  "chrono-serde",
+  "utoipa",
+  "validator",
+] }
+redis                  = { version = "1.7.1" }
+regex                  = { version = "1.13.1", features = ["std", "logging"] }
+reqwest                = { version = "0.13.5", features = ["json", "form"] }
+ring                   = { version = "0.17.14" }
+serde                  = { version = "1.0.229", features = ["derive"] }
+serde_json             = { version = "1.0.151" }
+subtle                 = { version = "2.6.1" }
+thiserror              = { version = "2.0.21" }
+tokio                  = { version = "1.53.1", features = ["full"] }
+tracing                = "0.1.44"
+tracing-subscriber     = { version = "0.3.23", features = ["env-filter"] }

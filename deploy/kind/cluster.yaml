@@ -1,0 +1,33 @@
+# The local cluster: one node, with the ingress controller's ports on this machine's 80 and 443,
+# bound to 127.0.0.1 only. Every public name is under broker.localhost, which browsers and curl
+# resolve to this machine by themselves; no hosts-file entries are needed.
+#
+# dev/k8s/up.sh fills in @REGISTRY_DIR@ (this checkout's dev/registry) when it creates the
+# cluster: the hub, the edges and the realm setup read the registry from there, live, so a
+# changed file reaches them within seconds, as on a shared volume in production.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: auth-broker
+nodes:
+  - role: control-plane
+    # Pinned, so everyone runs the same Kubernetes whatever kind version they installed. To
+    # upgrade: take the image for the new version from the kind release notes, then
+    # dev/k8s/down.sh && dev/k8s/up.sh.
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+    extraMounts:
+      - hostPath: "@REGISTRY_DIR@"
+        containerPath: /registry
+        readOnly: true
+    extraPortMappings:
+      # Traefik's NodePorts (deploy/platform/traefik-values.yaml).
+      - { containerPort: 30443, hostPort: 443, listenAddress: "127.0.0.1", protocol: TCP }
+      - { containerPort: 30080, hostPort: 80, listenAddress: "127.0.0.1", protocol: TCP }
+      # For the e2e tests (deploy/k8s/test-access.yaml), on the ports the docker compose stack
+      # used: Redis, the hub's metrics, the test helpers' controls, and the stand-in APIs.
+      - { containerPort: 30380, hostPort: 6380, listenAddress: "127.0.0.1", protocol: TCP }
+      - { containerPort: 30091, hostPort: 8091, listenAddress: "127.0.0.1", protocol: TCP }
+      - { containerPort: 30290, hostPort: 5290, listenAddress: "127.0.0.1", protocol: TCP }
+      - { containerPort: 30181, hostPort: 8181, listenAddress: "127.0.0.1", protocol: TCP }
+      - { containerPort: 30182, hostPort: 8182, listenAddress: "127.0.0.1", protocol: TCP }
+      - { containerPort: 30183, hostPort: 8183, listenAddress: "127.0.0.1", protocol: TCP }
+      - { containerPort: 30184, hostPort: 8184, listenAddress: "127.0.0.1", protocol: TCP }

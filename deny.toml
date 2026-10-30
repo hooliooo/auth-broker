@@ -1,0 +1,61 @@
+# cargo-deny configuration: `cargo deny check` (advisories, licenses, bans, sources).
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Every RustSec advisory fails the check, including unmaintained and yanked crates, unless
+# listed here with a reason.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licenses only.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    # The owner's private crates; see the clarifications below.
+    "LicenseRef-hooliooo-private",
+]
+confidence-threshold = 0.9
+exceptions = [
+    # aws-lc's C code carries OpenSSL's licence alongside ISC and Apache-2.0.
+    { allow = ["OpenSSL"], crate = "aws-lc-sys" },
+]
+
+# kern and ddd_macros are the owner's own crates (git dependency) without a licence field.
+[[licenses.clarify]]
+crate = "kern"
+expression = "LicenseRef-hooliooo-private"
+license-files = []
+
+[[licenses.clarify]]
+crate = "ddd_macros"
+expression = "LicenseRef-hooliooo-private"
+license-files = []
+
+[licenses.private]
+# Workspace crates are never published, so they carry no licence.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/hooliooo/kern.git"]

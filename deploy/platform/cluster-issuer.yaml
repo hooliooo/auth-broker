@@ -1,0 +1,11 @@
+# Certificates for every Ingress, signed by the local development CA (mkcert's), which this
+# machine's browsers trust. In production the same annotation points at the real issuer
+# (e.g. Let's Encrypt or the company CA); only this resource differs.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: local-ca
+spec:
+  ca:
+    # Created by dev/k8s/up.sh from mkcert's CA; never committed.
+    secretName: local-ca

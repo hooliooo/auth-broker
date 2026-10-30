@@ -1,0 +1,99 @@
+# The hub (crates/hub), behind the ingress at https://hub.broker.localhost: browsers visit it
+# while signing in and out; the edges call it there too, with signed requests. It reaches
+# Keycloak at https://keycloak.broker.localhost, resolved to the test helpers' Keycloak proxy
+# (test-helpers.yaml), which passes everything on unless a test told it to fail a request.
+apiVersion: v1
+kind: Service
+metadata:
+  name: hub
+  labels: { app: hub }
+spec:
+  selector: { app: hub }
+  ports:
+    - name: http
+      port: 8090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hub
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: hub }
+  template:
+    metadata:
+      labels: { app: hub }
+    spec:
+      hostAliases:
+        - ip: 10.96.0.200 # the keycloak-proxy Service
+          hostnames: [keycloak.broker.localhost]
+      containers:
+        - name: hub
+          image: auth-broker-kind-edge:dev
+          imagePullPolicy: Never
+          args: ["hub"]
+          env:
+            - { name: RUST_LOG, value: "hub=debug,info" }
+            - { name: IDENTITY_PROVIDER, value: keycloak }
+            - { name: ISSUER_URI, value: "https://keycloak.broker.localhost/realms/broker" }
+            - { name: HUB_PUBLIC_URL, value: "https://hub.broker.localhost" }
+            - { name: REDIS_URI, value: "redis://redis:6379" }
+            - { name: REGISTRY_DIR, value: /etc/hub/registry }
+            - { name: REGISTRY_RELOAD_SECS, value: "2" }
+            - { name: CLIENT_CREDENTIALS, value: private_key_jwt }
+            - { name: CLIENT_KEY_FILE, value: /run/secrets/hub/hub-client-key.pem }
+            # The tests send each simulated browser's address in this header, as Cloudflare
+            # would; the ingress passes it through, and only its pods are believed.
+            - { name: CLIENT_IP_HEADER, value: cf-connecting-ip }
+            - { name: TRUSTED_PROXIES, value: 10.244.0.0/16 }
+            - { name: LOGIN_PER_MINUTE_PER_IP, value: "10000" }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+          ports:
+            - name: http
+              containerPort: 8090
+            - name: metrics
+              containerPort: 9100
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: registry, mountPath: /etc/hub/registry, readOnly: true }
+            - { name: client-key, mountPath: /run/secrets/hub, readOnly: true }
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: registry
+          hostPath:
+            path: /registry
+            type: Directory
+        - name: client-key
+          secret:
+            secretName: hub-client-key
+        - name: local-ca
+          configMap:
+            name: local-ca
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hub
+  annotations:
+    cert-manager.io/cluster-issuer: local-ca
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [hub.broker.localhost]
+      secretName: hub-tls
+  rules:
+    - host: hub.broker.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hub
+                port: { name: http }

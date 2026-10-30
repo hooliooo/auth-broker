@@ -1,0 +1,88 @@
+# What the e2e tests reach from this machine besides the ingress, on NodePorts that
+# deploy/kind/cluster.yaml maps to 127.0.0.1 only, on the ports the docker compose stack used:
+# Redis (6380), the hub's metrics, never behind the ingress (8091), the test helpers' controls
+# (5290), and the stand-in APIs (8181 to 8184).
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-redis
+spec:
+  type: NodePort
+  selector: { app: redis }
+  ports:
+    - name: redis
+      port: 6379
+      nodePort: 30380
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-hub-metrics
+spec:
+  type: NodePort
+  selector: { app: hub }
+  ports:
+    - name: metrics
+      port: 9100
+      nodePort: 30091
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-test-helpers
+spec:
+  type: NodePort
+  selector: { app: test-helpers }
+  ports:
+    - name: http
+      port: 8000
+      nodePort: 30290
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-api-inspection
+spec:
+  type: NodePort
+  selector: { app: api-inspection }
+  ports:
+    - name: http
+      port: 8081
+      nodePort: 30181
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-api-billing
+spec:
+  type: NodePort
+  selector: { app: api-billing }
+  ports:
+    - name: http
+      port: 8081
+      nodePort: 30182
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-api-plant-d
+spec:
+  type: NodePort
+  selector: { app: api-plant-d }
+  ports:
+    - name: http
+      port: 8081
+      nodePort: 30183
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-api-plant-e
+spec:
+  type: NodePort
+  selector: { app: api-plant-e }
+  ports:
+    - name: http
+      port: 8081
+      nodePort: 30184

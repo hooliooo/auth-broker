@@ -1,0 +1,48 @@
+# Measurement build of the stack: hub and edges count their heap allocations and publish their
+# metrics, for the load tests in crates/e2e/tests/load.rs. Never use this build in production:
+# every allocation pays for the counting.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.perf.yml up -d --build
+#   cargo test --release -p e2e --features load --test load -- --nocapture --test-threads=1
+#
+# Own image tag, so the normal stack's image is not replaced.
+x-perf: &perf
+  image: auth-broker-kind-edge:perf
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      CARGO_FEATURES: hub/alloc-stats,edge/alloc-stats
+
+services:
+  hub:
+    <<: *perf
+    environment:
+      # Debug logging costs more than the requests being measured.
+      RUST_LOG: info
+  edge-inspection:
+    <<: *perf
+    environment:
+      RUST_LOG: info
+    ports:
+      - "8092:9100"
+  edge-billing:
+    <<: *perf
+    environment:
+      RUST_LOG: info
+    ports:
+      - "8093:9100"
+  edge-maintenance:
+    <<: *perf
+    environment:
+      RUST_LOG: info
+    ports:
+      - "8094:9100"
+  api-inspection:
+    <<: *perf
+  api-billing:
+    <<: *perf
+  api-plant-d:
+    <<: *perf
+  api-plant-e:
+    <<: *perf

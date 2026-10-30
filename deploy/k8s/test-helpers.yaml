@@ -1,0 +1,89 @@
+# The test helpers (crates/test-helpers): the recorder for the inspection kind's back-channel
+# logouts, which passes them on to the hub, and a proxy in front of Keycloak that can be told to
+# fail a request once.
+#
+# The proxy answers as https://keycloak.broker.localhost, with a certificate for that name from
+# the local CA, on a Service with a fixed address; the hub resolves Keycloak's name to that
+# address (hub.yaml), so its Keycloak calls pass through the proxy while it still uses Keycloak's
+# one public address. The proxy itself reaches Keycloak through the ingress, like any pod.
+# One replica only: armed faults and recorded tokens live in its memory.
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-helpers
+  labels: { app: test-helpers }
+spec:
+  selector: { app: test-helpers }
+  ports:
+    - name: http
+      port: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-proxy
+  labels: { app: test-helpers }
+spec:
+  selector: { app: test-helpers }
+  # Fixed, for the hub's hostAliases. From the low end of the service range, which Kubernetes
+  # keeps for fixed addresses and never hands out on its own.
+  clusterIP: 10.96.0.200
+  ports:
+    - name: https
+      port: 443
+      targetPort: proxy
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: keycloak-proxy-tls
+spec:
+  secretName: keycloak-proxy-tls
+  dnsNames: [keycloak.broker.localhost]
+  issuerRef:
+    kind: ClusterIssuer
+    name: local-ca
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-helpers
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: test-helpers }
+  template:
+    metadata:
+      labels: { app: test-helpers }
+    spec:
+      containers:
+        - name: test-helpers
+          image: auth-broker-kind-edge-test-helpers:dev
+          imagePullPolicy: Never
+          env:
+            - { name: KEYCLOAK_URL, value: "https://keycloak.broker.localhost" }
+            - { name: BACKCHANNEL_TARGET, value: "http://hub:8090/auth/backchannel-logout/inspection" }
+            - { name: PROXY_TLS_CERT, value: /etc/proxy-tls/tls.crt }
+            - { name: PROXY_TLS_KEY, value: /etc/proxy-tls/tls.key }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: proxy
+              containerPort: 8081
+          readinessProbe:
+            tcpSocket: { port: proxy }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 20m, memory: 16Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: proxy-tls, mountPath: /etc/proxy-tls, readOnly: true }
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: proxy-tls
+          secret:
+            secretName: keycloak-proxy-tls
+        - name: local-ca
+          configMap:
+            name: local-ca

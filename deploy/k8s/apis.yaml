@@ -1,0 +1,210 @@
+# The stand-in APIs (crates/test-api): each verifies the access token it receives, as a kind's
+# real API would, and answers with what it saw. Inspection's one central API serves all its
+# sites and scopes by the site the token names; billing's is reached through the hub; each
+# maintenance site has its own, accepting only tokens naming that site. The tests also reach
+# them directly (test-access.yaml), to present a token to the wrong kind.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-inspection
+  labels: { app: api-inspection }
+spec:
+  selector: { app: api-inspection }
+  ports:
+    - name: http
+      port: 8081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-inspection
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: api-inspection }
+  template:
+    metadata:
+      labels: { app: api-inspection }
+    spec:
+      containers:
+        - name: api
+          image: auth-broker-kind-edge:dev
+          imagePullPolicy: Never
+          args: ["test-api"]
+          env:
+            - { name: IDENTITY_PROVIDER, value: keycloak }
+            - { name: ISSUER_URI, value: "https://keycloak.broker.localhost/realms/broker" }
+            - { name: REVEAL_TOKEN, value: "true" }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+            - { name: EXPECTED_AUDIENCE, value: inspection-api }
+            - { name: EXPECTED_CLIENT, value: hub-inspection }
+          ports:
+            - name: http
+              containerPort: 8081
+          readinessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 20m, memory: 16Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: local-ca
+          configMap:
+            name: local-ca
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-billing
+  labels: { app: api-billing }
+spec:
+  selector: { app: api-billing }
+  ports:
+    - name: http
+      port: 8081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-billing
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: api-billing }
+  template:
+    metadata:
+      labels: { app: api-billing }
+    spec:
+      containers:
+        - name: api
+          image: auth-broker-kind-edge:dev
+          imagePullPolicy: Never
+          args: ["test-api"]
+          env:
+            - { name: IDENTITY_PROVIDER, value: keycloak }
+            - { name: ISSUER_URI, value: "https://keycloak.broker.localhost/realms/broker" }
+            - { name: REVEAL_TOKEN, value: "true" }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+            - { name: EXPECTED_AUDIENCE, value: billing-api }
+          ports:
+            - name: http
+              containerPort: 8081
+          readinessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 20m, memory: 16Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: local-ca
+          configMap:
+            name: local-ca
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-plant-d
+  labels: { app: api-plant-d }
+spec:
+  selector: { app: api-plant-d }
+  ports:
+    - name: http
+      port: 8081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-plant-d
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: api-plant-d }
+  template:
+    metadata:
+      labels: { app: api-plant-d }
+    spec:
+      containers:
+        - name: api
+          image: auth-broker-kind-edge:dev
+          imagePullPolicy: Never
+          args: ["test-api"]
+          env:
+            - { name: IDENTITY_PROVIDER, value: keycloak }
+            - { name: ISSUER_URI, value: "https://keycloak.broker.localhost/realms/broker" }
+            - { name: REVEAL_TOKEN, value: "true" }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+            - { name: EXPECTED_AUDIENCE, value: maintenance-api }
+            - { name: EXPECTED_CLIENT, value: hub-maintenance }
+            - { name: EXPECTED_SITE, value: plant-d }
+          ports:
+            - name: http
+              containerPort: 8081
+          readinessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 20m, memory: 16Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: local-ca
+          configMap:
+            name: local-ca
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-plant-e
+  labels: { app: api-plant-e }
+spec:
+  selector: { app: api-plant-e }
+  ports:
+    - name: http
+      port: 8081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-plant-e
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: api-plant-e }
+  template:
+    metadata:
+      labels: { app: api-plant-e }
+    spec:
+      containers:
+        - name: api
+          image: auth-broker-kind-edge:dev
+          imagePullPolicy: Never
+          args: ["test-api"]
+          env:
+            - { name: IDENTITY_PROVIDER, value: keycloak }
+            - { name: ISSUER_URI, value: "https://keycloak.broker.localhost/realms/broker" }
+            - { name: REVEAL_TOKEN, value: "true" }
+            - { name: SSL_CERT_FILE, value: /etc/local-ca/ca.crt }
+            - { name: EXPECTED_AUDIENCE, value: maintenance-api }
+            - { name: EXPECTED_CLIENT, value: hub-maintenance }
+            - { name: EXPECTED_SITE, value: plant-e }
+          ports:
+            - name: http
+              containerPort: 8081
+          readinessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 20m, memory: 16Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: local-ca, mountPath: /etc/local-ca, readOnly: true }
+      volumes:
+        - name: local-ca
+          configMap:
+            name: local-ca

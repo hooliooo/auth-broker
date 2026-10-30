@@ -1,0 +1,26 @@
+{
+  "app": {
+    "id": "maintenance",
+    "client_id": "hub-maintenance",
+    "edge_public_key": "@edge-maintenance@",
+    "api_audience": "maintenance-api",
+    "scopes": "openid profile email",
+    "required_role": "maintenance-user"
+  },
+  "sites": [
+    {
+      "enabled": true,
+      "id": "plant-d",
+      "origin": "@origin:plant-d@",
+      "api_url": "http://api-plant-d:8081",
+      "tenant": "customer4"
+    },
+    {
+      "enabled": true,
+      "id": "plant-e",
+      "origin": "@origin:plant-e@",
+      "api_url": "http://api-plant-e:8081",
+      "tenant": "customer5"
+    }
+  ]
+}

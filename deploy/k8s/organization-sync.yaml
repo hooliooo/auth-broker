@@ -1,0 +1,44 @@
+# The organization sync (providers/keycloak/setup/sync_organizations.sh): one organization per
+# site of every direct kind, from the registry, and a report of drift. In production it would
+# run on a schedule or after each registry change; here it is suspended and run on demand:
+#   kubectl --context kind-auth-broker -n auth-broker create job sync-now --from=cronjob/organization-sync
+# The e2e tests run it that way.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: organization-sync
+spec:
+  schedule: "0 * * * *"
+  suspend: true
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: sync
+              image: auth-broker-kind-edge-keycloak-config:dev
+              imagePullPolicy: Never
+              command: ["bash", "/mnt/setup/sync_organizations.sh"]
+              env:
+                - { name: keycloak_url, value: "http://keycloak:8080" }
+                - name: KEYCLOAK_ADMIN
+                  valueFrom:
+                    secretKeyRef: { name: keycloak-admin, key: username }
+                - name: KEYCLOAK_ADMIN_PASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: keycloak-admin, key: password }
+                - { name: realm, value: broker }
+              volumeMounts:
+                - { name: setup, mountPath: /mnt/setup, readOnly: true }
+                - { name: registry, mountPath: /mnt/registry, readOnly: true }
+          volumes:
+            - name: setup
+              configMap:
+                name: keycloak-setup-scripts
+            - name: registry
+              hostPath:
+                path: /registry
+                type: Directory

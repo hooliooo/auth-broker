@@ -1,0 +1,55 @@
+# The realm setup (providers/keycloak/setup/setup_realm.sh): one client per app kind, the test
+# users, and the organizations of the direct kinds' sites from the registry. Idempotent, so
+# dev/k8s/up.sh runs it on every pass; it talks to Keycloak's admin API inside the cluster.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: keycloak-setup
+  namespace: auth-broker
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-keycloak
+          image: auth-broker-kind-edge-keycloak-config:dev
+          imagePullPolicy: Never
+          command:
+            - bash
+            - -c
+            - until curl -sf http://keycloak:9000/health/ready >/dev/null; do echo waiting for Keycloak; sleep 3; done
+      containers:
+        - name: setup
+          image: auth-broker-kind-edge-keycloak-config:dev
+          imagePullPolicy: Never
+          command: ["bash", "/mnt/setup/setup_realm.sh"]
+          env:
+            - { name: keycloak_url, value: "http://keycloak:8080" }
+            - name: KEYCLOAK_ADMIN
+              valueFrom:
+                secretKeyRef: { name: keycloak-admin, key: username }
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: keycloak-admin, key: password }
+            - { name: realm, value: broker }
+            - { name: app_kinds, value: "inspection billing maintenance" }
+            - { name: direct_kinds, value: "inspection maintenance" }
+            # The hub as browsers reach it (its callback), and as Keycloak does (its keys and
+            # back-channel logouts), inside the cluster.
+            - { name: hub_public_url, value: "https://hub.broker.localhost" }
+            - { name: hub_internal_url, value: "http://hub:8090" }
+            # The inspection kind's back-channel logout goes through the recorder.
+            - { name: relay_kind, value: inspection }
+            - { name: relay_url, value: "http://test-helpers:8000/relay/backchannel-logout" }
+          volumeMounts:
+            - { name: setup, mountPath: /mnt/setup, readOnly: true }
+            - { name: registry, mountPath: /mnt/registry, readOnly: true }
+      volumes:
+        - name: setup
+          configMap:
+            name: keycloak-setup-scripts
+        - name: registry
+          hostPath:
+            path: /registry
+            type: Directory

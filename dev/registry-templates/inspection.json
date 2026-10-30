@@ -1,0 +1,41 @@
+{
+  "app": {
+    "id": "inspection",
+    "client_id": "hub-inspection",
+    "edge_public_key": "@edge-inspection@",
+    "api_audience": "inspection-api",
+    "scopes": "openid profile email",
+    "required_role": "inspection-user"
+  },
+  "sites": [
+    {
+      "enabled": true,
+      "id": "plant-a",
+      "origin": "@origin:plant-a@",
+      "api_url": "http://api-inspection:8081",
+      "tenant": "customer1"
+    },
+    {
+      "enabled": true,
+      "id": "plant-b",
+      "origin": "@origin:plant-b@",
+      "api_url": "http://api-inspection:8081",
+      "tenant": "customer2"
+    },
+    {
+      "enabled": false,
+      "id": "plant-retired",
+      "origin": "@origin:plant-retired@",
+      "api_url": "http://api-inspection:8081",
+      "tenant": "customer3"
+    },
+    {
+      "enabled": true,
+      "id": "plant-limited",
+      "origin": "@origin:plant-limited@",
+      "api_url": "http://api-inspection:8081",
+      "tenant": "customer9",
+      "login_per_minute": 3
+    }
+  ]
+}
