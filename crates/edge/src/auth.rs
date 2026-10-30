@@ -113,7 +113,7 @@ async fn login(
     Query(q): Query<LoginQuery>,
 ) -> Result<Response, EdgeError> {
     // Every site an edge serves has an origin: it was matched by its host.
-    let origin = site.origin.as_ref().ok_or(EdgeError::UnknownSite)?;
+    let origin = site.origin().ok_or(EdgeError::UnknownSite)?;
     let login = LoginCookie {
         state: random_token()?,
         verifier: pkce::new_verifier()?,

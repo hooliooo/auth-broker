@@ -180,10 +180,10 @@ members_of() {
 }
 every() { true; }
 even() { (( $1 % 2 == 0 )); }
-# Every pool user is a member of the inspection sites plant-a, plant-b and plant-limited; of
-# plant-d, and the even ones also of plant-e; and of the native installations plant-f, plant-g
-# and plant-h.
-if [[ " $direct_kinds " == *" inspection "* ]]; then members_of every plant-a plant-b plant-limited; fi
+# Every pool user is a member of the inspection installations plant-a, plant-b, plant-limited
+# and the native plant-i; of plant-d, and the even ones also of plant-e; and of the native
+# installations plant-f, plant-g and plant-h.
+if [[ " $direct_kinds " == *" inspection "* ]]; then members_of every plant-a plant-b plant-limited plant-i; fi
 if [[ " $direct_kinds " == *" maintenance "* ]]; then
   members_of every plant-d
   members_of even plant-e

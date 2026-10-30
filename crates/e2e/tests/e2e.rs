@@ -1477,7 +1477,7 @@ async fn given_sign_ins_and_refreshes_then_they_are_counted() {
     wait_for_stack().await;
     let sign_ins = hub_metric(
         "hub_sign_ins_total",
-        r#"kind="billing",outcome="completed""#,
+        r#"kind="billing",access="web",outcome="completed""#,
     )
     .await;
     let refreshes = hub_metric(
@@ -1498,7 +1498,7 @@ async fn given_sign_ins_and_refreshes_then_they_are_counted() {
     assert!(
         hub_metric(
             "hub_sign_ins_total",
-            r#"kind="billing",outcome="completed""#
+            r#"kind="billing",access="web",outcome="completed""#
         )
         .await
             > sign_ins

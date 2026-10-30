@@ -52,7 +52,7 @@ const COUNTERS: &[Description] = &[
     (
         "hub_sign_ins_total",
         "counter",
-        "Completed and failed sign-ins, by app kind.",
+        "Completed and failed sign-ins, by app kind and installation access type (web or native).",
     ),
     (
         "hub_token_refreshes_total",

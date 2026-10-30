@@ -110,18 +110,20 @@ are.
   choose; its sites then have no `api_url`.
 - `origin`: one hostname per site, pointing at the kind's edge. The edge tells sites apart by it,
   so each site keeps its own cookies.
-- `native` instead of `edge_public_key` makes the kind's installations desktop apps (see
-  [Native installations](#native-installations)): each installation lists its own `keys`
-  instead of an `origin`, and `native.redirect_path` (default `/callback`) is its app's loopback
-  path.
+- `native` lets the kind have desktop-app installations (see
+  [Native installations](#native-installations)): each lists its own `keys` instead of an
+  `origin`, and `native.redirect_path` (default `/callback`) is its app's loopback path. A kind
+  has `edge_public_key`, `native` or both: with both, each installation is a web app (an
+  `origin`) or a desktop app (`keys`), all under the kind's one Keycloak client.
 
 Check a change before submitting it: `hub validate-registry <dir>`.
 
 ## Native installations
 
-A kind whose installations are desktop apps on the customer's premises is **native**: its app
-signs users in through the hub, and Keycloak has one client per kind, never one per
-installation (RFC 8252, OAuth 2.0 for Native Apps; see the RFC "Native installations").
+An installation that is a desktop app on the customer's premises is **native**: its app signs
+users in through the hub, and Keycloak has one client per kind, never one per installation
+(RFC 8252, OAuth 2.0 for Native Apps). A kind may have native installations only, or alongside
+web-app installations served by its edge.
 
 ```json
 { "app": { "id": "planner", "client_id": "hub-planner", "native": { "redirect_path": "/callback" },
@@ -140,13 +142,19 @@ installation (RFC 8252, OAuth 2.0 for Native Apps; see the RFC "Native installat
    access tokens from `/broker/token` the same way, for its API.
 
 Every request is signed with the installation's own Ed25519 key, so the hub knows which
-installation is calling; an installation may list several keys, e.g. one per workstation.
+installation is calling; an installation may list several keys, e.g. one per workstation. A
+request names its key in `x-site-key-id` (the first 16 characters of the key's base64url
+SHA-256), so the hub checks one key however many the installation has, and turns away an
+unknown one without a signature check. The kind's edge key never speaks for a native
+installation, nor an installation's key for a web-app one.
 `native-app keygen <installation> <key file>` makes a key and prints its registry entry.
 Retiring an installation (`"enabled": false`) or removing a key refuses its next request.
 
 In the local cluster, the native kind `planner` has the installations `plant-f` (two
-workstation keys), `plant-g` and the retired `plant-h`; their keys are in
-`dev/keys/installation-*.key` and their API at `http://localhost:8185`. To sign in through your
+workstation keys), `plant-g` and the retired `plant-h`, with their API at
+`http://localhost:8185`; and the mixed kind `inspection` has, beside its web-app
+installations, the native `plant-i`, with its API at `http://localhost:8181`. Their keys are in
+`dev/keys/installation-*.key`. To sign in through your
 own browser:
 
 ```
@@ -173,6 +181,7 @@ cargo run -p native-app -- sign-out
 | `LOGIN_PER_MINUTE_PER_IP`                    | `30`            | sign-in starts per client IP                                                                                        |
 | `CLIENT_IP_HEADER`, `TRUSTED_PROXIES`        |                 | a reverse proxy's client IP header, believed only from these ranges                                                 |
 | `MAX_CLOCK_SKEW_SECS`                        | `30`            | how far an edge's clock may drift                                                                                   |
+| `SERVED_ACCESS`                              | `web,native`    | the installation access types this deployment serves; installations of another type are refused as unknown          |
 | `LISTEN_ADDR`                                | `0.0.0.0:8090`  | public address                                                                                                      |
 | `METRICS_ADDR`                               | `0.0.0.0:9100`  | Prometheus metrics, apart from the public port (feature `metrics`)                                                  |
 | `ALLOW_INSECURE_HTTP`                        | `false`         | `true` accepts `http://` URLs; local stacks only                                                                    |

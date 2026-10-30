@@ -18,7 +18,7 @@ use thiserror::Error;
 use crate::{
     headers,
     random::{RandomUnavailable, random_token},
-    registry::KEY_PREFIX,
+    registry::{KEY_PREFIX, key_id},
 };
 
 /// Domain separation: a signature made for this protocol can never be valid for anything else.
@@ -90,6 +90,8 @@ pub struct SignedHeaders {
     pub nonce: String,
     /// The Ed25519 signature, base64url.
     pub signature: String,
+    /// The signing key's id; not part of what is signed: a wrong one only fails verification.
+    pub key_id: String,
 }
 
 impl SignedHeaders {
@@ -100,6 +102,7 @@ impl SignedHeaders {
             (headers::SITE_TIMESTAMP, self.timestamp.to_string()),
             (headers::SITE_NONCE, self.nonce.clone()),
             (headers::SITE_SIGNATURE, self.signature.clone()),
+            (headers::SITE_KEY_ID, self.key_id.clone()),
         ];
         for (name, value) in pairs {
             // All values are base64url, digits or registry-validated ids: always valid headers.
@@ -128,6 +131,17 @@ impl EdgeSigner {
     /// The app kind this signer signs for.
     pub fn app_id(&self) -> &str {
         &self.app_id
+    }
+
+    /// This key's id, as the registry computes it from the public key.
+    pub fn key_id(&self) -> String {
+        let public: [u8; 32] = self
+            .key
+            .public_key()
+            .as_ref()
+            .try_into()
+            .expect("an Ed25519 public key is 32 bytes");
+        key_id(&public)
     }
 
     /// The `edge_public_key` value for the kind's registry entry.
@@ -176,6 +190,7 @@ impl EdgeSigner {
             timestamp,
             nonce: nonce.to_owned(),
             signature: URL_SAFE_NO_PAD.encode(signature.as_ref()),
+            key_id: self.key_id(),
         }
     }
 }

@@ -48,8 +48,8 @@ impl Sites {
             .registry
             .app(app_id)
             .ok_or_else(|| ConfigError::UnknownApp(app_id.to_owned()))?;
-        if app.is_native() {
-            return Err(ConfigError::NativeKind(app_id.to_owned()));
+        if !app.serves_web() {
+            return Err(ConfigError::NoWebAccess(app_id.to_owned()));
         }
         match (parse_public_key(edge_public_key), app.edge_public_key) {
             (Some(key), Some(registered)) if key == registered => {}
@@ -87,13 +87,14 @@ impl Sites {
             .map_or(1, |app| app.max_concurrency)
     }
 
-    /// How many enabled sites this edge serves now.
+    /// How many enabled web-app installations this edge serves now; the kind's native
+    /// installations go to the hub themselves.
     pub fn count(&self) -> usize {
         self.current()
             .registry
             .sites()
             .iter()
-            .filter(|s| s.enabled && s.app_id == self.app_id)
+            .filter(|s| s.enabled && s.app_id == self.app_id && !s.is_native())
             .count()
     }
 

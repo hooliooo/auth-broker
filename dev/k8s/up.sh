@@ -193,8 +193,9 @@ Hub:             https://hub.broker.localhost
 Sites:           https://plant-a.inspection.broker.localhost, plant-b.inspection
                  https://plant-c.billing.broker.localhost
                  https://plant-d.maintenance.broker.localhost, plant-e.maintenance
-Native:          the planner kind's desktop installations plant-f and plant-g (crates/native-app),
-                 calling their API at http://localhost:8185
+Native:          the planner kind's desktop installations plant-f and plant-g, calling their
+                 API at http://localhost:8185, and the inspection kind's plant-i, at
+                 http://localhost:8181 (crates/native-app)
                  (Chrome and Firefox resolve *.localhost by themselves; Safari does not)
 Admin password:  kubectl --context $ctx -n $ns get secret keycloak-admin -o jsonpath='{.data.password}' | base64 -d
 E2E tests:       cargo test -p e2e --features e2e

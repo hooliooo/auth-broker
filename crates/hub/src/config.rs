@@ -117,6 +117,45 @@ pub struct HubConfig {
     pub listen: SocketAddr,
     /// Where Prometheus metrics are served, apart from the public port.
     pub metrics_addr: SocketAddr,
+    /// `SERVED_ACCESS`: the access types this deployment serves, `web` and `native` by default;
+    /// a deployment for one type only refuses installations of the other as unknown.
+    pub served_access: ServedAccess,
+}
+
+/// The installation access types a hub deployment serves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServedAccess {
+    /// Web-app installations, through their kind's edge.
+    pub web: bool,
+    /// Native installations, signing for themselves.
+    pub native: bool,
+}
+
+impl ServedAccess {
+    /// Parses a comma-separated list of `web` and `native`; at least one.
+    pub fn parse(value: &str) -> Option<Self> {
+        let mut served = Self {
+            web: false,
+            native: false,
+        };
+        for part in value.split(',').map(str::trim) {
+            match part {
+                "web" => served.web = true,
+                "native" => served.native = true,
+                _ => return None,
+            }
+        }
+        (served.web || served.native).then_some(served)
+    }
+
+    /// Whether this deployment serves `site`.
+    pub fn serves(&self, site: &common::registry::Site) -> bool {
+        if site.is_native() {
+            self.native
+        } else {
+            self.web
+        }
+    }
 }
 
 /// The value of variable `name`.
@@ -169,6 +208,10 @@ impl HubConfig {
                 "METRICS_ADDR",
                 "0.0.0.0:9100".parse().expect("valid address"),
             )?,
+            served_access: ServedAccess::parse(
+                &std::env::var("SERVED_ACCESS").unwrap_or_else(|_| "web,native".into()),
+            )
+            .ok_or(ConfigError::Invalid("SERVED_ACCESS"))?,
         })
     }
 
@@ -196,6 +239,26 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn given_served_access_lists_then_only_web_and_native_parse() {
+        let both = ServedAccess {
+            web: true,
+            native: true,
+        };
+        assert_eq!(ServedAccess::parse("web,native"), Some(both));
+        assert_eq!(ServedAccess::parse(" native , web "), Some(both));
+        assert_eq!(
+            ServedAccess::parse("native"),
+            Some(ServedAccess {
+                web: false,
+                native: true
+            })
+        );
+        for bad in ["", "web,", "mobile", "web;native"] {
+            assert_eq!(ServedAccess::parse(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn given_a_public_url_when_deriving_endpoints_then_one_callback_serves_every_kind() {

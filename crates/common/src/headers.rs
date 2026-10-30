@@ -10,6 +10,9 @@ pub const SITE_TIMESTAMP: &str = "x-site-timestamp";
 pub const SITE_NONCE: &str = "x-site-nonce";
 /// The edge's Ed25519 signature; see [`crate::signing`].
 pub const SITE_SIGNATURE: &str = "x-site-signature";
+/// Which of the signer's keys signed: its key id ([`crate::registry::key_id`]), so the hub
+/// verifies with that one key, however many a native installation has.
+pub const SITE_KEY_ID: &str = "x-site-key-id";
 /// The session handle from the site's cookie, covered by the signature.
 pub const SESSION_HANDLE: &str = "x-session-handle";
 /// The site's tenant, set by the hub from the registry.
@@ -18,11 +21,12 @@ pub const TENANT: &str = "x-tenant";
 pub const APP_ID: &str = "x-app-id";
 
 /// Headers only the broker itself may set; anything a browser sends with these names is dropped.
-pub const BROKER_HEADERS: [&str; 7] = [
+pub const BROKER_HEADERS: [&str; 8] = [
     SITE_ID,
     SITE_TIMESTAMP,
     SITE_NONCE,
     SITE_SIGNATURE,
+    SITE_KEY_ID,
     SESSION_HANDLE,
     TENANT,
     APP_ID,

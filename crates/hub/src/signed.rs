@@ -1,5 +1,5 @@
 //! Verifies that a request really comes from a kind's edge, for one of the kind's registered,
-//! enabled sites; or, for a native kind, from the installation itself.
+//! enabled web-app installations; or from a native installation itself, with one of its keys.
 
 use std::sync::Arc;
 
@@ -60,8 +60,17 @@ impl FromRequestParts<AppState> for SignedEdge {
         let (site, app) = catalog
             .registry
             .enabled(site_id)
+            .filter(|(site, _)| state.config.served_access.serves(site))
             .ok_or(AppError::Unauthorized(
                 "signature from unknown or disabled site",
+            ))?;
+        // The kind's one edge key for a web-app installation, so only the edge of the site's own
+        // kind can speak for it; the named key for a native installation, so only that
+        // installation can. One lookup and one verification, however many keys it has.
+        let key = site
+            .verifying_key(app, header(parts, headers::SITE_KEY_ID))
+            .ok_or(AppError::Unauthorized(
+                "signature key unknown for this site",
             ))?;
         let timestamp: u64 = timestamp
             .parse()
@@ -83,13 +92,7 @@ impl FromRequestParts<AppState> for SignedEdge {
             nonce,
             handle: handle.as_deref(),
         };
-        // The kind's one edge key, so only the edge of the site's own kind can speak for it;
-        // or a native installation's own keys, so only that installation can.
-        let verified = site
-            .verifying_keys(app)
-            .into_iter()
-            .any(|key| signing::verify(key, &input, signature));
-        if !verified {
+        if !signing::verify(key, &input, signature) {
             return Err(AppError::Unauthorized("signature invalid"));
         }
 

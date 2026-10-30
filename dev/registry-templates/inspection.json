@@ -3,6 +3,7 @@
     "id": "inspection",
     "client_id": "hub-inspection",
     "edge_public_key": "@edge-inspection@",
+    "native": { "redirect_path": "/callback" },
     "api_audience": "inspection-api",
     "scopes": "openid profile email",
     "required_role": "inspection-user"
@@ -36,6 +37,13 @@
       "api_url": "http://api-inspection:8081",
       "tenant": "customer9",
       "login_per_minute": 3
+    },
+    {
+      "enabled": true,
+      "id": "plant-i",
+      "keys": ["@installation-plant-i@"],
+      "api_url": "http://localhost:8181",
+      "tenant": "customer10"
     }
   ]
 }

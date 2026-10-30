@@ -267,3 +267,110 @@ async fn given_a_signed_in_installation_when_signing_out_then_its_session_and_to
     assert!(app.whoami(&session).await.is_err());
     assert!(app.access_token(&session).await.is_err());
 }
+
+// A mixed kind: inspection serves web-app installations through its edge, and native
+// installation plant-i signs for itself, under the same Keycloak client.
+
+#[tokio::test]
+async fn given_a_native_installation_of_a_mixed_kind_then_its_tokens_come_from_the_kinds_client_and_name_it()
+ {
+    wait_for_stack().await;
+    let app = installation("plant-i");
+    let session = native_sign_in(&app, &fresh_user()).await;
+    let who = app.whoami(&session).await.unwrap();
+    assert_eq!(who["app"], "inspection");
+    assert_eq!(who["tenant"], "customer10");
+
+    let token = app.access_token(&session).await.unwrap();
+    let response = client()
+        .get(format!("{ECHO_INSPECTION}/reports"))
+        .bearer_auth(&token.access_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the kind's API accepts it"
+    );
+    let echo: Value = response.json().await.unwrap();
+    let claims = &echo["bearer"]["claims"];
+    assert_eq!(
+        claims["azp"], "hub-inspection",
+        "the same client as the kind's web-app installations"
+    );
+    assert!(
+        claims["organization"].get("plant-i").is_some(),
+        "{}",
+        claims["organization"]
+    );
+}
+
+#[tokio::test]
+async fn given_a_mixed_kind_then_its_edge_cannot_speak_for_its_native_installation_nor_the_installation_for_a_web_one()
+ {
+    wait_for_stack().await;
+    let session = native_app::Session {
+        handle: "not-a-handle".into(),
+    };
+    let edge_as_plant_i = installation_with("plant-i", &edge_key("inspection"));
+    assert!(matches!(
+        edge_as_plant_i.whoami(&session).await,
+        Err(native_app::Error::Refused(StatusCode::UNAUTHORIZED))
+    ));
+    let plant_i_as_plant_a = installation_with("plant-a", &installation_key("plant-i"));
+    assert!(matches!(
+        plant_i_as_plant_a.whoami(&session).await,
+        Err(native_app::Error::Refused(StatusCode::UNAUTHORIZED))
+    ));
+}
+
+#[tokio::test]
+async fn given_a_request_naming_a_wrong_key_or_none_then_the_hub_refuses_it() {
+    wait_for_stack().await;
+    let app = installation("plant-f");
+    let session = native_sign_in(&app, &fresh_user()).await;
+    let signer =
+        common::signing::EdgeSigner::from_base64("plant-f", &installation_key("plant-f")).unwrap();
+    let desk_2 =
+        common::signing::EdgeSigner::from_base64("plant-f", &installation_key("plant-f-desk-2"))
+            .unwrap();
+    let send = |key_id: Option<String>| {
+        let signed = signer
+            .sign(
+                "plant-f",
+                "GET",
+                "/broker/session",
+                Some(&session.handle),
+                now(),
+            )
+            .unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        signed.apply(&mut headers);
+        match key_id {
+            Some(id) => headers.insert(common::headers::SITE_KEY_ID, id.parse().unwrap()),
+            None => headers.remove(common::headers::SITE_KEY_ID),
+        };
+        client()
+            .get(format!("{HUB}/broker/session"))
+            .headers(headers)
+            .header(common::headers::SESSION_HANDLE, &session.handle)
+            .send()
+    };
+    assert_eq!(
+        send(Some(signer.key_id())).await.unwrap().status(),
+        StatusCode::OK,
+        "its own key id"
+    );
+    for (key_id, why) in [
+        (None, "no key id"),
+        (Some("not-a-key-id".to_owned()), "an unknown key id"),
+        (Some(desk_2.key_id()), "another of the installation's keys"),
+    ] {
+        assert_eq!(
+            send(key_id).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED,
+            "{why}"
+        );
+    }
+}

@@ -1,24 +1,32 @@
 //! The registry: every app kind the hub serves, and every site of each kind.
 //!
-//! Each team owns one JSON document (one file) describing its app kind and its sites. A kind
-//! reaches the hub in one of two ways:
+//! Each team owns one JSON document (one file) describing its app kind and its sites
+//! (installations). Each installation runs one of two kinds of application ([`Access`]):
 //!
-//! - **through an edge**: browser apps; the kind's one edge (its `edge_public_key`) serves every
-//!   site under the site's own `origin`, and signs for each;
-//! - **natively**: desktop apps on the installation's premises (`native`); each installation
-//!   signs for itself with its own key (`keys`, one or more, e.g. one per workstation), and signs
-//!   users in through the system browser with a loopback redirect (RFC 8252).
+//! - **a web app**, served by the kind's one edge (the kind's `edge_public_key`) under the
+//!   installation's own `origin`; the edge signs for it;
+//! - **a native app**, a desktop app on the installation's premises (the kind's `native`
+//!   settings); the installation signs for itself with its own `keys` (one or more, e.g. one per
+//!   workstation), and signs users in through the system browser with a loopback redirect
+//!   (RFC 8252).
 //!
-//! Onboarding a site is one entry in that file; adding a kind is one new file and one identity
-//! provider client, plus one edge deployment for an edge kind. The hub and every edge combine
-//! all documents and refuse the whole set if any of them is invalid.
+//! A kind may have installations of both. Onboarding an installation is one entry in that file;
+//! adding a kind is one new file and one identity provider client, plus one edge deployment if it
+//! has web-app installations. The hub and every edge combine all documents, refuse the whole set
+//! if any of them is invalid, and index it so every lookup takes constant time.
 
-use std::{collections::HashSet, fs, io, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs, io,
+    path::Path,
+};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Url;
 use serde::Deserialize;
 use thiserror::Error;
+
+use ring::digest::{SHA256, digest};
 
 use crate::crypto::hash_key;
 
@@ -47,10 +55,11 @@ struct AppEntry {
     /// See [`App::client_secret_file`].
     #[serde(default)]
     client_secret_file: Option<String>,
-    /// See [`App::edge_public_key`], as `ed25519:<base64url>`; for a kind served by an edge.
+    /// See [`App::edge_public_key`], as `ed25519:<base64url>`; for a kind with web-app
+    /// installations.
     #[serde(default)]
     edge_public_key: Option<String>,
-    /// See [`App::native`]; for a kind whose installations sign themselves.
+    /// See [`App::native`]; for a kind with native installations.
     #[serde(default)]
     native: Option<NativeEntry>,
     /// See [`App::api_upstream`]; absent for a kind whose edge calls its sites' APIs directly.
@@ -75,7 +84,7 @@ struct AppEntry {
     login_per_minute: u64,
 }
 
-/// A native kind's settings as written in a registry file; see [`Native`] for the fields.
+/// A kind's native settings as written in a registry file; see [`Native`] for the fields.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NativeEntry {
@@ -110,10 +119,10 @@ fn default_login_rate() -> u64 {
 struct SiteEntry {
     /// See [`Site::id`].
     id: String,
-    /// See [`Site::origin`]; for an edge kind's site.
+    /// See [`Access::Web`]; for a web-app installation.
     #[serde(default)]
     origin: Option<String>,
-    /// See [`Site::keys`], each as `ed25519:<base64url>`; for a native kind's installation.
+    /// See [`Access::Native`], each as `ed25519:<base64url>`; for a native installation.
     #[serde(default)]
     keys: Vec<String>,
     /// See [`Site::api_url`]; only for a kind whose edge calls its sites' APIs directly.
@@ -145,11 +154,11 @@ pub struct App {
     /// `private_key_jwt`.
     pub client_secret_file: Option<String>,
     /// The Ed25519 public key of the kind's edge: every request the edge sends for any of the
-    /// kind's sites must verify against it. Unique across kinds and installations. `None` for a
-    /// native kind.
+    /// kind's web-app installations must verify against it. Unique across kinds and
+    /// installations. `None` for a kind without web-app installations.
     pub edge_public_key: Option<[u8; 32]>,
-    /// For a kind of desktop apps whose installations sign for themselves; `None` for a kind
-    /// served by an edge.
+    /// How the kind's native app signs users in; `None` for a kind without native
+    /// installations.
     pub native: Option<Native>,
     /// The kind's API, if the hub forwards its sites' `/api/*` calls there. `None` for a
     /// kind whose edge calls each site's own API ([`Site::api_url`]) with tokens from the hub
@@ -172,7 +181,7 @@ pub struct App {
     pub login_per_minute: u64,
 }
 
-/// A native kind's settings: how its desktop app signs users in.
+/// A kind's native settings: how its desktop-app installations sign users in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Native {
     /// The path of the app's loopback redirect, e.g. `/callback`: after sign-in the hub sends the
@@ -181,21 +190,43 @@ pub struct Native {
     pub redirect_path: String,
 }
 
-/// A site (installation) of one app kind: served by the kind's edge under its own origin, or,
-/// for a native kind, a desktop installation that signs for itself.
+/// What an installation runs, and so how it reaches the hub. Every place the hub and the edge
+/// treat the two differently matches on this.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// A web app, served by the kind's edge under this origin: scheme, host and port only, e.g.
+    /// `https://plant-a.inspection.example.com`. Browsers use it; the edge tells installations
+    /// apart by it and signs for them with the kind's key.
+    Web {
+        /// The installation's origin.
+        origin: Url,
+    },
+    /// A native app that signs for itself with one of these keys; several allow a key per
+    /// workstation.
+    Native {
+        /// The installation's keys.
+        keys: Vec<InstallationKey>,
+    },
+}
+
+/// One of a native installation's Ed25519 public keys, and its id ([`key_id`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstallationKey {
+    /// The id requests signed with it name.
+    pub id: String,
+    /// The public key.
+    pub key: [u8; 32],
+}
+
+/// A site (installation) of one app kind, running a web app or a native app ([`Access`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Site {
     /// The site's id, e.g. `plant-7`; unique across kinds.
     pub id: String,
     /// The id of the site's app kind.
     pub app_id: String,
-    /// Scheme, host and port only, e.g. `https://plant-a.inspection.example.com`. Browsers use it;
-    /// it points at the kind's edge, which tells sites apart by it. `None` for a native
-    /// installation, which has no web origin.
-    pub origin: Option<Url>,
-    /// A native installation's Ed25519 public keys: every request it sends must verify against
-    /// one of them. Several allow a key per workstation. Empty for an edge kind's site.
-    pub keys: Vec<[u8; 32]>,
+    /// What the installation runs, and how it reaches the hub.
+    pub access: Access,
     /// For a kind whose edge calls its sites' APIs directly: this site's API.
     pub api_url: Option<Url>,
     /// The customer the site belongs to; the API receives it as `x-tenant`.
@@ -213,9 +244,9 @@ impl App {
         self.api_upstream.is_none()
     }
 
-    /// Whether the kind's installations are desktop apps that sign for themselves.
-    pub fn is_native(&self) -> bool {
-        self.native.is_some()
+    /// Whether the kind has, or may have, web-app installations: it has an edge key.
+    pub fn serves_web(&self) -> bool {
+        self.edge_public_key.is_some()
     }
 }
 
@@ -223,7 +254,7 @@ impl Site {
     /// Whether a request whose `Host` header is `host` is for this site: the same host,
     /// ignoring case, and the same port, the scheme's default if none is given.
     pub fn serves_host(&self, host: &str) -> bool {
-        let Some(origin) = &self.origin else {
+        let Some(origin) = self.origin() else {
             return false;
         };
         // `[::1]:8080` splits at its last colon; `[::1]` alone leaves `1]`, which is no port.
@@ -244,10 +275,37 @@ impl Site {
             && Some(port.unwrap_or(default_port)) == origin.port_or_known_default()
     }
 
-    /// Where the hub sends the browser back to after sign-in at an edge kind's site; `None`
+    /// A web-app installation's origin; `None` for a native installation, which has none.
+    pub fn origin(&self) -> Option<&Url> {
+        match &self.access {
+            Access::Web { origin } => Some(origin),
+            Access::Native { .. } => None,
+        }
+    }
+
+    /// A native installation's keys; empty for a web-app installation.
+    pub fn keys(&self) -> &[InstallationKey] {
+        match &self.access {
+            Access::Web { .. } => &[],
+            Access::Native { keys } => keys,
+        }
+    }
+
+    /// Whether the installation runs a native app.
+    pub fn is_native(&self) -> bool {
+        matches!(self.access, Access::Native { .. })
+    }
+
+    /// The installation's access type, `web` or `native`, for metrics and the hub's
+    /// `SERVED_ACCESS`.
+    pub fn access_kind(&self) -> &'static str {
+        if self.is_native() { "native" } else { "web" }
+    }
+
+    /// Where the hub sends the browser back to after sign-in at a web-app installation; `None`
     /// for a native installation, whose app names its loopback address at each sign-in.
     pub fn handoff_url(&self) -> Option<Url> {
-        let origin = self.origin.as_ref()?;
+        let origin = self.origin()?;
         Some(
             origin
                 .join("/auth/handoff")
@@ -255,19 +313,23 @@ impl Site {
         )
     }
 
-    /// The site's start page; `None` for a native installation.
+    /// The installation's start page; `None` for a native installation.
     pub fn home_url(&self) -> Option<Url> {
-        let origin = self.origin.as_ref()?;
+        let origin = self.origin()?;
         Some(origin.join("/").expect("origin joins a fixed path"))
     }
 
-    /// The keys a request for this site may be signed with: its kind's edge key, or a native
-    /// installation's own keys.
-    pub fn verifying_keys<'a>(&'a self, app: &'a App) -> Vec<&'a [u8; 32]> {
-        if app.is_native() {
-            self.keys.iter().collect()
-        } else {
-            app.edge_public_key.iter().collect()
+    /// The one key a request for this installation must verify against, given the key id it
+    /// names: its kind's edge key for a web-app installation, whatever the id; the native
+    /// installation's key with that id otherwise. `None`, refused before any cryptography, for
+    /// an id it does not have.
+    pub fn verifying_key<'a>(&'a self, app: &'a App, key_id: Option<&str>) -> Option<&'a [u8; 32]> {
+        match &self.access {
+            Access::Web { .. } => app.edge_public_key.as_ref(),
+            Access::Native { keys } => {
+                let id = key_id?;
+                keys.iter().find(|key| key.id == id).map(|key| &key.key)
+            }
         }
     }
 }
@@ -326,21 +388,25 @@ pub enum RegistryError {
     /// Two kinds share an edge key: one edge could then sign for both.
     #[error("app '{0}': edge_public_key is already used by another app; each kind needs its own")]
     DuplicateEdgeKey(String),
-    /// A kind names neither or both of an edge key and native settings.
+    /// A kind names neither an edge key nor native settings.
     #[error(
-        "app '{0}': needs exactly one of edge_public_key (its sites are served by an edge) and native (its installations sign for themselves)"
+        "app '{0}': needs edge_public_key (for web-app installations), native (for native installations), or both"
     )]
     KindAccess(String),
-    /// A native kind's redirect path is not a plain absolute path.
+    /// A kind's native redirect path is not a plain absolute path.
     #[error(
         "app '{0}': native.redirect_path must be an absolute path such as /callback, without query or fragment"
     )]
     InvalidRedirectPath(String),
-    /// A site has an origin and keys that do not fit its kind.
-    #[error(
-        "site '{0}': an edge kind's site needs an origin and no keys; a native kind's installation needs keys and no origin"
-    )]
+    /// An installation names neither or both of an origin and keys.
+    #[error("site '{0}': needs an origin (a web app) or keys (a native app), not both")]
     SiteAccess(String),
+    /// A web-app installation whose kind has no edge key: no edge could serve it.
+    #[error("site '{0}': a web-app installation needs its kind's edge_public_key")]
+    NoEdgeKey(String),
+    /// A native installation whose kind has no native settings.
+    #[error("site '{0}': a native installation needs its kind's native settings")]
+    NoNativeSettings(String),
     /// A native installation's key is malformed.
     #[error("site '{0}': keys must each be 'ed25519:' followed by 32 bytes in base64url")]
     InvalidInstallationKey(String),
@@ -360,13 +426,29 @@ pub enum RegistryError {
     InvalidTenant(String),
 }
 
-/// Every app kind and site the hub serves, validated together.
+/// Every app kind and site the hub serves, validated together and indexed.
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
     /// The app kinds, one per document.
     apps: Vec<App>,
     /// Every kind's sites.
     sites: Vec<Site>,
+    /// Index into `sites` by id: the hub looks a site up on every signed request.
+    by_id: HashMap<String, usize>,
+    /// Index into `sites` by kind and `Host` header ([`host_key`]): the edge looks a site up on
+    /// every request.
+    by_host: HashMap<String, usize>,
+}
+
+/// The [`Registry::by_host`] key of `host` (lowercase) at kind `app_id`'s edge.
+fn host_key(app_id: &str, host: &str) -> String {
+    format!("{app_id}\n{host}")
+}
+
+/// A key's id: the first 16 characters of the base64url SHA-256 of its 32 bytes. Signed requests
+/// name it, so the hub verifies with one key however many an installation has.
+pub fn key_id(key: &[u8; 32]) -> String {
+    URL_SAFE_NO_PAD.encode(digest(&SHA256, key).as_ref())[..16].to_owned()
 }
 
 impl Registry {
@@ -375,8 +457,10 @@ impl Registry {
         documents: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> Result<Self, RegistryError> {
         let mut registry = Registry::default();
-        // Edge and installation keys share one set: no key may speak for two of them.
-        let (mut app_ids, mut clients, mut site_ids, mut origins, mut keys) = (
+        // Edge and installation keys share one set, and their ids another: no key, nor any id,
+        // may speak for two of them.
+        let (mut app_ids, mut clients, mut site_ids, mut origins, mut keys, mut key_ids) = (
+            HashSet::new(),
             HashSet::new(),
             HashSet::new(),
             HashSet::new(),
@@ -394,7 +478,7 @@ impl Registry {
                 return Err(RegistryError::DuplicateClient(app.id, app.client_id));
             }
             if let Some(edge_key) = app.edge_public_key
-                && !keys.insert(edge_key)
+                && !(keys.insert(edge_key) && key_ids.insert(key_id(&edge_key)))
             {
                 return Err(RegistryError::DuplicateEdgeKey(app.id));
             }
@@ -403,19 +487,43 @@ impl Registry {
                 if !site_ids.insert(site.id.clone()) {
                     return Err(RegistryError::DuplicateId(site.id));
                 }
-                if let Some(origin) = &site.origin
+                if let Some(origin) = site.origin()
                     && !origins.insert(origin.as_str().to_owned())
                 {
                     return Err(RegistryError::DuplicateOrigin(site.id));
                 }
-                if !site.keys.iter().all(|key| keys.insert(*key)) {
+                if !site
+                    .keys()
+                    .iter()
+                    .all(|key| keys.insert(key.key) && key_ids.insert(key.id.clone()))
+                {
                     return Err(RegistryError::DuplicateKey(site.id));
                 }
                 registry.sites.push(site);
             }
             registry.apps.push(app);
         }
+        registry.index();
         Ok(registry)
+    }
+
+    /// Builds the lookup indexes. A web-app installation is found by its host with its port, and
+    /// also without it when the port is its scheme's default, as browsers send `Host`.
+    fn index(&mut self) {
+        for (i, site) in self.sites.iter().enumerate() {
+            self.by_id.insert(site.id.clone(), i);
+            if let Some(origin) = site.origin() {
+                // The URL parser lowercases the host already.
+                let host = origin.host_str().unwrap_or_default();
+                let port = origin.port_or_known_default().unwrap_or_default();
+                self.by_host
+                    .insert(host_key(&site.app_id, &format!("{host}:{port}")), i);
+                let default_port = if origin.scheme() == "https" { 443 } else { 80 };
+                if port == default_port {
+                    self.by_host.insert(host_key(&site.app_id, host), i);
+                }
+            }
+        }
     }
 
     /// Every app kind.
@@ -435,7 +543,7 @@ impl Registry {
 
     /// Any registered site, enabled or not.
     pub fn get(&self, id: &str) -> Option<&Site> {
-        self.sites.iter().find(|s| s.id == id)
+        self.by_id.get(id).map(|&i| &self.sites[i])
     }
 
     /// An enabled site and its app: the only sites allowed to sign users in and
@@ -445,11 +553,14 @@ impl Registry {
         Some((site, self.app(&site.app_id)?))
     }
 
-    /// The enabled site of kind `app_id` that a request with `Host` header `host` is for.
+    /// The enabled web-app installation of kind `app_id` that a request with `Host` header
+    /// `host` is for: the same host, ignoring case, and the same port, the scheme's default if
+    /// none is given.
     pub fn site_for_host(&self, app_id: &str, host: &str) -> Option<&Site> {
-        self.sites
-            .iter()
-            .find(|s| s.enabled && s.app_id == app_id && s.serves_host(host))
+        let i = *self
+            .by_host
+            .get(&host_key(app_id, &host.to_ascii_lowercase()))?;
+        Some(&self.sites[i]).filter(|site| site.enabled)
     }
 }
 
@@ -536,13 +647,18 @@ fn validate_app(entry: AppEntry) -> Result<App, RegistryError> {
         ));
     }
     let scopes = scopes.join(" ");
-    let (edge_public_key, native) = match (entry.edge_public_key, entry.native) {
-        (Some(key), None) => {
-            let key = parse_public_key(&key)
-                .ok_or_else(|| RegistryError::InvalidPublicKey(id.clone()))?;
-            (Some(key), None)
-        }
-        (None, Some(native)) => {
+    if entry.edge_public_key.is_none() && entry.native.is_none() {
+        return Err(RegistryError::KindAccess(id));
+    }
+    let edge_public_key = entry
+        .edge_public_key
+        .map(|key| {
+            parse_public_key(&key).ok_or_else(|| RegistryError::InvalidPublicKey(id.clone()))
+        })
+        .transpose()?;
+    let native = entry
+        .native
+        .map(|native| {
             let path = &native.redirect_path;
             let plain = path.starts_with('/')
                 && !path.starts_with("//")
@@ -550,18 +666,15 @@ fn validate_app(entry: AppEntry) -> Result<App, RegistryError> {
                 && path
                     .bytes()
                     .all(|b| b.is_ascii_graphic() && !matches!(b, b'?' | b'#'));
-            if !plain {
-                return Err(RegistryError::InvalidRedirectPath(id));
-            }
-            (
-                None,
-                Some(Native {
+            if plain {
+                Ok(Native {
                     redirect_path: native.redirect_path,
-                }),
-            )
-        }
-        _ => return Err(RegistryError::KindAccess(id)),
-    };
+                })
+            } else {
+                Err(RegistryError::InvalidRedirectPath(id.clone()))
+            }
+        })
+        .transpose()?;
     Ok(App {
         id,
         edge_public_key,
@@ -585,19 +698,37 @@ fn validate_site(entry: SiteEntry, app: &App) -> Result<Site, RegistryError> {
         return Err(RegistryError::InvalidId(id));
     }
 
-    // An edge kind's site is a web origin; a native installation is its keys.
-    let origin = match (entry.origin, app.is_native(), entry.keys.is_empty()) {
-        (Some(origin), false, true) => Some(validate_origin(&id, &origin)?),
-        (None, true, false) => None,
+    // A web-app installation is an origin its kind's edge serves; a native installation is
+    // its keys, under its kind's native settings.
+    let access = match (entry.origin, entry.keys.is_empty()) {
+        (Some(origin), true) => {
+            if app.edge_public_key.is_none() {
+                return Err(RegistryError::NoEdgeKey(id));
+            }
+            Access::Web {
+                origin: validate_origin(&id, &origin)?,
+            }
+        }
+        (None, false) => {
+            if app.native.is_none() {
+                return Err(RegistryError::NoNativeSettings(id));
+            }
+            let keys = entry
+                .keys
+                .iter()
+                .map(|text| {
+                    let key = parse_public_key(text)
+                        .ok_or_else(|| RegistryError::InvalidInstallationKey(id.clone()))?;
+                    Ok(InstallationKey {
+                        id: key_id(&key),
+                        key,
+                    })
+                })
+                .collect::<Result<Vec<_>, RegistryError>>()?;
+            Access::Native { keys }
+        }
         _ => return Err(RegistryError::SiteAccess(id)),
     };
-    let keys = entry
-        .keys
-        .iter()
-        .map(|key| {
-            parse_public_key(key).ok_or_else(|| RegistryError::InvalidInstallationKey(id.clone()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
 
     if entry.api_url.is_some() != app.direct() {
         return Err(RegistryError::ApiUrlPlacement(id));
@@ -624,8 +755,7 @@ fn validate_site(entry: SiteEntry, app: &App) -> Result<Site, RegistryError> {
     Ok(Site {
         id,
         app_id: app.id.clone(),
-        origin,
-        keys,
+        access,
         api_url,
         tenant,
         enabled: entry.enabled,
@@ -963,20 +1093,24 @@ mod tests {
         )
     }
 
+    /// The 32 bytes of test key `name`.
+    fn key_bytes(name: &str) -> [u8; 32] {
+        parse_public_key(&key(name)).unwrap()
+    }
+
     #[test]
-    fn given_a_native_kind_then_its_installations_sign_with_their_own_keys() {
+    fn given_a_native_installation_then_it_signs_with_its_own_keys() {
         let r = native(&[installation("plant-f", &["f-desk-1", "f-desk-2"])]).unwrap();
         let (site, app) = r.enabled("plant-f").unwrap();
-        assert!(app.is_native());
-        assert_eq!(app.edge_public_key, None);
+        assert!(site.is_native());
+        assert!(!app.serves_web());
         assert_eq!(
             app.native.as_ref().unwrap().redirect_path,
             "/callback",
             "default"
         );
-        assert_eq!(site.origin, None);
-        assert_eq!(site.keys.len(), 2, "a key per workstation");
-        assert_eq!(site.verifying_keys(app).len(), 2);
+        assert_eq!(site.origin(), None);
+        assert_eq!(site.keys().len(), 2, "a key per workstation");
         assert_eq!(
             site.handoff_url(),
             None,
@@ -986,12 +1120,59 @@ mod tests {
     }
 
     #[test]
-    fn given_misplaced_origins_and_keys_then_the_site_is_refused() {
-        // A native installation with an origin, without keys, or with a malformed key.
-        let with_origin = installation("plant-f", &["f"])
+    fn given_a_key_id_then_exactly_that_key_verifies_the_installation() {
+        let r = native(&[installation("plant-f", &["f-desk-1", "f-desk-2"])]).unwrap();
+        let (site, app) = r.enabled("plant-f").unwrap();
+        let desk_2 = key_bytes("f-desk-2");
+        assert_eq!(
+            site.verifying_key(app, Some(&key_id(&desk_2))),
+            Some(&desk_2)
+        );
+        assert_eq!(
+            site.verifying_key(app, Some("unknown-key-id")),
+            None,
+            "refused before any cryptography"
+        );
+        assert_eq!(
+            site.verifying_key(app, None),
+            None,
+            "a native installation must name its key"
+        );
+    }
+
+    #[test]
+    fn given_a_mixed_kind_then_web_and_native_installations_each_verify_their_own_way() {
+        let doc = format!(
+            r#"{{ "app": {{ "id": "inspection", "client_id": "hub-inspection", "edge_public_key": "{}", "native": {{}}, "api_audience": "i" }},
+                "sites": [ {{ "id": "plant-a", "origin": "https://plant-a.example", "tenant": "t", "api_url": "https://api.example" }},
+                           {} ] }}"#,
+            key("inspection"),
+            installation("plant-i", &["i-desk"])
+        );
+        let r = Registry::from_documents([("inspection.json", doc.as_str())]).unwrap();
+        let (web, app) = r.enabled("plant-a").unwrap();
+        let (desktop, _) = r.enabled("plant-i").unwrap();
+        let edge_key = key_bytes("inspection");
+        // The kind's edge speaks for its web-app installation, never for its native one.
+        assert_eq!(web.verifying_key(app, None), Some(&edge_key));
+        assert_eq!(desktop.verifying_key(app, Some(&key_id(&edge_key))), None);
+        assert_eq!(
+            desktop.verifying_key(app, Some(&key_id(&key_bytes("i-desk")))),
+            Some(&key_bytes("i-desk"))
+        );
+        assert_eq!(
+            r.site_for_host("inspection", "plant-a.example").unwrap().id,
+            "plant-a"
+        );
+    }
+
+    #[test]
+    fn given_misplaced_origins_and_keys_then_the_installation_is_refused() {
+        // Both an origin and keys, or neither.
+        let both = installation("plant-f", &["f"])
             .replace(r#""tenant""#, r#""origin": "https://f.example", "tenant""#);
         assert_eq!(
-            native(&[with_origin]).unwrap_err(),
+            native(&[both]).unwrap_err(),
             RegistryError::SiteAccess("plant-f".into())
         );
         assert_eq!(
@@ -1001,34 +1182,36 @@ mod tests {
             .unwrap_err(),
             RegistryError::SiteAccess("plant-f".into())
         );
+        // A web-app installation in a kind without an edge key, and a native one in a kind without
+        // native settings.
+        assert_eq!(
+            native(&[r#"{ "id": "plant-w", "origin": "https://w.example", "tenant": "t", "api_url": "https://api.example" }"#.into()]).unwrap_err(),
+            RegistryError::NoEdgeKey("plant-w".into())
+        );
+        let keyed = format!(
+            r#"{{ "id": "a", "tenant": "t", "keys": ["{}"] }}"#,
+            key("a")
+        );
+        assert_eq!(
+            one(&[keyed]).unwrap_err(),
+            RegistryError::NoNativeSettings("a".into())
+        );
         let bad_key = installation("plant-f", &["f"]).replace(&key("f"), "ed25519:abc");
         assert_eq!(
             native(&[bad_key]).unwrap_err(),
             RegistryError::InvalidInstallationKey("plant-f".into())
         );
-        // An edge kind's site with keys.
-        let edge_site_with_keys =
+        let edge_site_with_empty_keys =
             r#"{ "id": "a", "origin": "https://a.example", "tenant": "t", "keys": [] }"#;
         assert!(
-            one(&[edge_site_with_keys.into()]).is_ok(),
+            one(&[edge_site_with_empty_keys.into()]).is_ok(),
             "an empty list is no keys"
-        );
-        let keyed = format!(
-            r#"{{ "id": "a", "origin": "https://a.example", "tenant": "t", "keys": ["{}"] }}"#,
-            key("a")
-        );
-        assert_eq!(
-            one(&[keyed]).unwrap_err(),
-            RegistryError::SiteAccess("a".into())
         );
     }
 
     #[test]
-    fn given_a_kind_with_both_or_neither_access_then_it_is_refused() {
+    fn given_a_kind_without_either_access_or_a_bad_redirect_path_then_it_is_refused() {
         let load = |doc: String| Registry::from_documents([("x.json", doc.as_str())]).unwrap_err();
-        let both = document("inspection", "c", &[])
-            .replace(r#""api_audience""#, r#""native": {}, "api_audience""#);
-        assert_eq!(load(both), RegistryError::KindAccess("inspection".into()));
         let neither = document("inspection", "c", &[]).replace(
             &format!(r#""edge_public_key": "{}", "#, key("inspection")),
             "",
@@ -1051,7 +1234,6 @@ mod tests {
 
     #[test]
     fn given_a_key_used_twice_then_the_set_is_refused() {
-        // Two installations, or an installation and an edge, sharing a key.
         assert_eq!(
             native(&[
                 installation("plant-f", &["shared"]),
@@ -1069,6 +1251,140 @@ mod tests {
             Registry::from_documents([("a.json", edge.as_str()), ("b.json", planner.as_str())])
                 .unwrap_err(),
             RegistryError::DuplicateKey("plant-f".into())
+        );
+    }
+
+    #[test]
+    fn given_the_index_then_lookups_match_the_rules_for_hosts() {
+        let r = one(&[
+            site("plant-a", "https://plant-a.example"),
+            site("plant-b", "http://plant-b.localhost:5201"),
+        ])
+        .unwrap();
+        // Every site the index finds, the scan-based rule agrees with, and the reverse.
+        for host in [
+            "plant-a.example",
+            "PLANT-A.example:443",
+            "plant-a.example:8443",
+            "plant-b.localhost:5201",
+            "plant-b.localhost",
+            "x",
+        ] {
+            let indexed = r.site_for_host("inspection", host).map(|s| s.id.clone());
+            let scanned = r
+                .sites()
+                .iter()
+                .find(|s| s.serves_host(host))
+                .map(|s| s.id.clone());
+            assert_eq!(indexed, scanned, "{host}");
+        }
+        assert_eq!(r.get("plant-b").unwrap().id, "plant-b");
+        assert!(r.get("plant-z").is_none());
+    }
+
+    /// Measures lookups and signature checks at tens of thousands of installations and keys:
+    /// `cargo test --release -p common measure_at_scale -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn measure_at_scale() {
+        use std::time::Instant;
+
+        use crate::signing::{EdgeSigner, SignatureInput, generate_key, verify};
+
+        const N: u32 = 20_000;
+        let dummy = |n: u32, tag: u8| {
+            let mut bytes = [tag; 32];
+            bytes[..4].copy_from_slice(&n.to_be_bytes());
+            format!("{KEY_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes))
+        };
+        // A workstation-heavy installation: 500 real keys; requests signed with the last one.
+        let signers: Vec<EdgeSigner> = (0..500)
+            .map(|_| EdgeSigner::from_base64("big", &generate_key().unwrap()).unwrap())
+            .collect();
+        let big_keys: Vec<String> = signers
+            .iter()
+            .map(|s| format!(r#""{}""#, s.public_key()))
+            .collect();
+        let mut native_sites: Vec<String> = (0..N)
+            .map(|n| format!(r#"{{ "id": "inst-{n}", "tenant": "t", "api_url": "https://api.example", "keys": ["{}"] }}"#, dummy(n, 1)))
+            .collect();
+        native_sites.push(format!(r#"{{ "id": "inst-big", "tenant": "t", "api_url": "https://api.example", "keys": [{}] }}"#, big_keys.join(",")));
+        let native = format!(
+            r#"{{ "app": {{ "id": "planner", "client_id": "hub-planner", "native": {{}}, "api_audience": "p" }}, "sites": [{}] }}"#,
+            native_sites.join(",")
+        );
+        let web_sites: Vec<String> = (0..N)
+            .map(|n| format!(r#"{{ "id": "web-{n}", "origin": "https://web-{n}.inspection.example", "tenant": "t", "api_url": "https://api.example" }}"#))
+            .collect();
+        let web = format!(
+            r#"{{ "app": {{ "id": "inspection", "client_id": "hub-inspection", "edge_public_key": "{}", "api_audience": "i" }}, "sites": [{}] }}"#,
+            dummy(0, 9),
+            web_sites.join(",")
+        );
+
+        let started = Instant::now();
+        let registry = Registry::from_documents([
+            ("planner.json", native.as_str()),
+            ("inspection.json", web.as_str()),
+        ])
+        .unwrap();
+        println!(
+            "registry: {} sites, {} keys, {:.1} MB, loaded, validated and indexed in {:?}",
+            registry.sites().len(),
+            N + 500,
+            (native.len() + web.len()) as f64 / 1e6,
+            started.elapsed()
+        );
+        let per = |label: &str, rounds: u32, f: &mut dyn FnMut()| {
+            let started = Instant::now();
+            for _ in 0..rounds {
+                f();
+            }
+            println!("{label}: {:?} per call", started.elapsed() / rounds);
+        };
+        per("site lookup by id, first site", 100_000, &mut || {
+            std::hint::black_box(registry.enabled("inst-0"));
+        });
+        per("site lookup by id, last site", 100_000, &mut || {
+            std::hint::black_box(registry.enabled("web-19999"));
+        });
+        per("site lookup by host, last site", 100_000, &mut || {
+            std::hint::black_box(
+                registry.site_for_host("inspection", "web-19999.inspection.example"),
+            );
+        });
+        let (site, app) = registry.enabled("inst-big").unwrap();
+        let signer = signers.last().unwrap();
+        let signed = signer.sign_with(
+            "inst-big",
+            "POST",
+            "/broker/token",
+            Some("h"),
+            1,
+            "nonce-nonce-nonce-nonce",
+        );
+        let input = SignatureInput {
+            site_id: "inst-big",
+            method: "POST",
+            path_and_query: "/broker/token",
+            timestamp: 1,
+            nonce: "nonce-nonce-nonce-nonce",
+            handle: Some("h"),
+        };
+        per(
+            "signature check, 500-key installation, by key id",
+            2_000,
+            &mut || {
+                let key = site.verifying_key(app, Some(&signed.key_id)).unwrap();
+                std::hint::black_box(verify(key, &input, &signed.signature));
+            },
+        );
+        per(
+            "refusing an unknown key id, 500-key installation",
+            100_000,
+            &mut || {
+                std::hint::black_box(site.verifying_key(app, Some("not-a-key-id")));
+            },
         );
     }
 }

@@ -153,6 +153,7 @@ async fn broker_login(
     let (site, app) = catalog
         .registry
         .enabled(&q.site)
+        .filter(|(site, _)| state.config.served_access.serves(site))
         .ok_or(AppError::BadRequest("unknown or disabled site"))?;
     if q.code_challenge_method != pkce::METHOD || !pkce::is_challenge(&q.code_challenge) {
         return Err(AppError::BadRequest("edge PKCE challenge must be S256"));
@@ -160,9 +161,11 @@ async fn broker_login(
     if !signing::is_nonce(&q.state) {
         return Err(AppError::BadRequest("edge state malformed"));
     }
-    // A native app listens on loopback for this sign-in only; an edge's site has its registered
-    // origin, and no request may move it.
-    let native_redirect = match (&app.native, q.redirect_uri.as_deref()) {
+    // A native installation's app listens on loopback for this sign-in only; a web-app
+    // installation has its registered origin, and no request may move it. The installation
+    // decides, not its kind: a kind may have both.
+    let native = app.native.as_ref().filter(|_| site.is_native());
+    let native_redirect = match (native, q.redirect_uri.as_deref()) {
         (Some(native), Some(uri)) => Some(
             loopback::redirect(uri, &native.redirect_path)
                 .ok_or(AppError::BadRequest(
@@ -177,7 +180,7 @@ async fn broker_login(
         }
         (None, Some(_)) => {
             return Err(AppError::BadRequest(
-                "an edge's site returns to its registered origin; redirect_uri is not accepted",
+                "a web-app installation returns to its registered origin; redirect_uri is not accepted",
             ));
         }
         (None, None) => None,
@@ -340,7 +343,8 @@ async fn callback(
         .state
         .as_deref()
         .map(|hub_state| cookie::login_cookie(HUB_LOGIN_COOKIE, hub_state));
-    let (result, kind) = complete_sign_in(&state, &headers, q, login_cookie.as_deref()).await;
+    let (result, labels) = complete_sign_in(&state, &headers, q, login_cookie.as_deref()).await;
+    let (kind, access) = labels.unwrap_or_else(|| ("unknown".into(), "unknown"));
     let outcome = if result.is_ok() {
         "completed"
     } else {
@@ -348,10 +352,7 @@ async fn callback(
     };
     metrics::counter(
         "hub_sign_ins_total",
-        &[
-            ("kind", kind.as_deref().unwrap_or("unknown")),
-            ("outcome", outcome),
-        ],
+        &[("kind", &kind), ("access", access), ("outcome", outcome)],
     );
     let mut response = result.unwrap_or_else(IntoResponse::into_response);
     if let Some(name) = login_cookie
@@ -364,14 +365,15 @@ async fn callback(
 
 /// The work of [`callback`]: checks query `q` against `state`'s pending sign-in and the browser's
 /// `login_cookie` in `headers`, exchanges the code, checks the tokens, and redirects to the
-/// site with a handoff code. Also returns the app kind, once known.
+/// site with a handoff code. Also returns the app kind and the installation's access type, once
+/// known.
 async fn complete_sign_in(
     state: &AppState,
     headers: &HeaderMap,
     q: CallbackQuery,
     login_cookie: Option<&str>,
-) -> (Result<Response, AppError>, Option<String>) {
-    let mut kind = None;
+) -> (Result<Response, AppError>, Option<(String, &'static str)>) {
+    let mut labels = None;
     let result = async {
         if let Some(error) = q.error.as_deref() {
             warn!(error, description = ?q.error_description, "the provider rejected sign-in");
@@ -410,7 +412,7 @@ async fn complete_sign_in(
             .registry
             .enabled(&pending.site_id)
             .ok_or(AppError::Unauthorized("site disabled during sign-in"))?;
-        kind = Some(app.id.clone());
+        labels = Some((app.id.clone(), site.access_kind()));
         let client = client_for(state, &app.id)?;
 
         let provider = state.config.provider.as_ref();
@@ -492,7 +494,7 @@ async fn complete_sign_in(
         Ok(response)
     }
     .await;
-    (result, kind)
+    (result, labels)
 }
 
 /// Exchanges authorization `code` and PKCE `verifier` for tokens at the provider, as `client`;

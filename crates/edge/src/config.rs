@@ -44,9 +44,9 @@ pub enum ConfigError {
     /// The edge's key is not the one the registry lists for its kind.
     #[error("EDGE_KEY does not match the edge_public_key of app '{0}' in the registry")]
     KeyMismatch(String),
-    /// `APP_ID` is a native kind, whose installations sign for themselves: no edge serves it.
-    #[error("app '{0}' is a native kind: its installations sign for themselves, no edge serves it")]
-    NativeKind(String),
+    /// `APP_ID` has native installations only, which sign for themselves: no edge serves it.
+    #[error("app '{0}' has no edge key: its installations are native and sign for themselves")]
+    NoWebAccess(String),
 }
 
 /// The edge's settings.

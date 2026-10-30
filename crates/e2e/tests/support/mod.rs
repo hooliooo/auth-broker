@@ -99,7 +99,7 @@ pub const ECHO_MAINT_D: &str = "http://localhost:8183";
 pub const ECHO_MAINT_E: &str = "http://localhost:8184";
 /// Has every kind's role but is a member of no site.
 pub const USER_OUTSIDER: &str = "test-user-outsider";
-/// The native kind's API, which its desktop installations call from this machine.
+/// The planner kind's API, which its desktop installations call from this machine.
 pub const ECHO_PLANNER: &str = "http://localhost:8185";
 /// The stand-in APIs, reachable directly only so tests can present a token to the wrong kind.
 pub const ECHO_INSPECTION: &str = "http://localhost:8181";
