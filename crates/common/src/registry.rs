@@ -19,6 +19,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs, io,
     path::Path,
+    sync::Arc,
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -204,9 +205,52 @@ pub enum Access {
     /// A native app that signs for itself with one of these keys; several allow a key per
     /// workstation.
     Native {
-        /// The installation's keys.
-        keys: Vec<InstallationKey>,
+        /// The installation's keys, shared: copying a site does not copy them.
+        keys: Arc<InstallationKeys>,
     },
+}
+
+/// A native installation's keys, found by id in constant time however many it has.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstallationKeys {
+    /// The keys, in registry order.
+    list: Vec<InstallationKey>,
+    /// Index into `list` by key id, from [`InstallationKeys::INDEXED_FROM`] keys on; a shorter
+    /// list is searched as fast, without a map per installation.
+    by_id: Option<HashMap<String, usize>>,
+}
+
+impl InstallationKeys {
+    /// How many keys an installation needs before they are indexed.
+    const INDEXED_FROM: usize = 9;
+
+    /// Indexes `list`, whose ids validation has made unique.
+    fn new(list: Vec<InstallationKey>) -> Self {
+        let by_id = (list.len() >= Self::INDEXED_FROM).then(|| {
+            list.iter()
+                .enumerate()
+                .map(|(i, key)| (key.id.clone(), i))
+                .collect()
+        });
+        Self { list, by_id }
+    }
+
+    /// Every key, in registry order.
+    pub fn as_slice(&self) -> &[InstallationKey] {
+        &self.list
+    }
+
+    /// The key with id `id`.
+    pub fn get(&self, id: &str) -> Option<&[u8; 32]> {
+        match &self.by_id {
+            Some(by_id) => by_id.get(id).map(|&i| &self.list[i].key),
+            None => self
+                .list
+                .iter()
+                .find(|key| key.id == id)
+                .map(|key| &key.key),
+        }
+    }
 }
 
 /// One of a native installation's Ed25519 public keys, and its id ([`key_id`]).
@@ -287,7 +331,7 @@ impl Site {
     pub fn keys(&self) -> &[InstallationKey] {
         match &self.access {
             Access::Web { .. } => &[],
-            Access::Native { keys } => keys,
+            Access::Native { keys } => keys.as_slice(),
         }
     }
 
@@ -326,10 +370,7 @@ impl Site {
     pub fn verifying_key<'a>(&'a self, app: &'a App, key_id: Option<&str>) -> Option<&'a [u8; 32]> {
         match &self.access {
             Access::Web { .. } => app.edge_public_key.as_ref(),
-            Access::Native { keys } => {
-                let id = key_id?;
-                keys.iter().find(|key| key.id == id).map(|key| &key.key)
-            }
+            Access::Native { keys } => keys.get(key_id?),
         }
     }
 }
@@ -544,6 +585,20 @@ impl Registry {
         }
     }
 
+    /// This registry narrowed to kind `app_id` and its sites, re-indexed. For an edge, which
+    /// validates the whole set as the hub does, so both accept and refuse the same changes, but
+    /// serves one kind and need not hold the others.
+    pub fn only_kind(mut self, app_id: &str) -> Self {
+        self.apps.retain(|app| app.id == app_id);
+        self.sites.retain(|site| site.app_id == app_id);
+        self.apps.shrink_to_fit();
+        self.sites.shrink_to_fit();
+        self.by_id = HashMap::new();
+        self.by_host = HashMap::new();
+        self.index();
+        self
+    }
+
     /// Every app kind.
     pub fn apps(&self) -> &[App] {
         &self.apps
@@ -743,7 +798,9 @@ fn validate_site(entry: SiteEntry, app: &App) -> Result<Site, RegistryError> {
                     })
                 })
                 .collect::<Result<Vec<_>, RegistryError>>()?;
-            Access::Native { keys }
+            Access::Native {
+                keys: Arc::new(InstallationKeys::new(keys)),
+            }
         }
         _ => return Err(RegistryError::SiteAccess(id)),
     };
@@ -1159,6 +1216,67 @@ mod tests {
     }
 
     #[test]
+    fn given_few_or_many_keys_then_each_is_found_by_its_id() {
+        for count in [
+            1,
+            InstallationKeys::INDEXED_FROM - 1,
+            InstallationKeys::INDEXED_FROM,
+            40,
+        ] {
+            let names: Vec<String> = (0..count).map(|n| format!("desk-{n}")).collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            let r = native(&[installation("plant-f", &names)]).unwrap();
+            let (site, app) = r.enabled("plant-f").unwrap();
+            for name in &names {
+                let bytes = key_bytes(name);
+                assert_eq!(
+                    site.verifying_key(app, Some(&key_id(&bytes))),
+                    Some(&bytes),
+                    "{count} keys"
+                );
+            }
+            assert_eq!(
+                site.verifying_key(app, Some("unknown")),
+                None,
+                "{count} keys"
+            );
+        }
+    }
+
+    #[test]
+    fn given_a_copied_installation_then_its_keys_are_shared_not_copied() {
+        let r = native(&[installation("plant-f", &["f-desk-1", "f-desk-2"])]).unwrap();
+        let site = r.get("plant-f").unwrap();
+        assert_eq!(site.clone().keys().as_ptr(), site.keys().as_ptr());
+    }
+
+    #[test]
+    fn given_one_kind_kept_then_only_its_sites_are_found() {
+        let planner = format!(
+            r#"{{ "app": {{ "id": "planner", "client_id": "hub-planner", "native": {{}}, "api_audience": "p" }}, "sites": [ {} ] }}"#,
+            installation("plant-f", &["f"])
+        );
+        let inspection = document(
+            "inspection",
+            "hub-inspection",
+            &[site("plant-a", "https://plant-a.example")],
+        );
+        let r = Registry::from_documents([
+            ("a.json", inspection.as_str()),
+            ("b.json", planner.as_str()),
+        ])
+        .unwrap()
+        .only_kind("inspection");
+        assert_eq!(r.apps().len(), 1);
+        assert_eq!(r.sites().len(), 1);
+        assert_eq!(
+            r.site_for_host("inspection", "plant-a.example").unwrap().id,
+            "plant-a"
+        );
+        assert!(r.get("plant-f").is_none(), "another kind's installation");
+    }
+
+    #[test]
     fn given_a_mixed_kind_then_web_and_native_installations_each_verify_their_own_way() {
         let doc = format!(
             r#"{{ "app": {{ "id": "inspection", "client_id": "hub-inspection", "edge_public_key": "{}", "native": {{}}, "api_audience": "i" }},
@@ -1324,112 +1442,6 @@ mod tests {
                 site("second", "http://plant.localhost:8080")
             ])
             .is_ok()
-        );
-    }
-
-    /// Measures lookups and signature checks at tens of thousands of installations and keys:
-    /// `cargo test --release -p common measure_at_scale -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn measure_at_scale() {
-        use std::time::Instant;
-
-        use crate::signing::{EdgeSigner, SignatureInput, generate_key, verify};
-
-        const N: u32 = 20_000;
-        let dummy = |n: u32, tag: u8| {
-            let mut bytes = [tag; 32];
-            bytes[..4].copy_from_slice(&n.to_be_bytes());
-            format!("{KEY_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes))
-        };
-        // A workstation-heavy installation: 500 real keys; requests signed with the last one.
-        let signers: Vec<EdgeSigner> = (0..500)
-            .map(|_| EdgeSigner::from_base64("big", &generate_key().unwrap()).unwrap())
-            .collect();
-        let big_keys: Vec<String> = signers
-            .iter()
-            .map(|s| format!(r#""{}""#, s.public_key()))
-            .collect();
-        let mut native_sites: Vec<String> = (0..N)
-            .map(|n| format!(r#"{{ "id": "inst-{n}", "tenant": "t", "api_url": "https://api.example", "keys": ["{}"] }}"#, dummy(n, 1)))
-            .collect();
-        native_sites.push(format!(r#"{{ "id": "inst-big", "tenant": "t", "api_url": "https://api.example", "keys": [{}] }}"#, big_keys.join(",")));
-        let native = format!(
-            r#"{{ "app": {{ "id": "planner", "client_id": "hub-planner", "native": {{}}, "api_audience": "p" }}, "sites": [{}] }}"#,
-            native_sites.join(",")
-        );
-        let web_sites: Vec<String> = (0..N)
-            .map(|n| format!(r#"{{ "id": "web-{n}", "origin": "https://web-{n}.inspection.example", "tenant": "t", "api_url": "https://api.example" }}"#))
-            .collect();
-        let web = format!(
-            r#"{{ "app": {{ "id": "inspection", "client_id": "hub-inspection", "edge_public_key": "{}", "api_audience": "i" }}, "sites": [{}] }}"#,
-            dummy(0, 9),
-            web_sites.join(",")
-        );
-
-        let started = Instant::now();
-        let registry = Registry::from_documents([
-            ("planner.json", native.as_str()),
-            ("inspection.json", web.as_str()),
-        ])
-        .unwrap();
-        println!(
-            "registry: {} sites, {} keys, {:.1} MB, loaded, validated and indexed in {:?}",
-            registry.sites().len(),
-            N + 500,
-            (native.len() + web.len()) as f64 / 1e6,
-            started.elapsed()
-        );
-        let per = |label: &str, rounds: u32, f: &mut dyn FnMut()| {
-            let started = Instant::now();
-            for _ in 0..rounds {
-                f();
-            }
-            println!("{label}: {:?} per call", started.elapsed() / rounds);
-        };
-        per("site lookup by id, first site", 100_000, &mut || {
-            std::hint::black_box(registry.enabled("inst-0"));
-        });
-        per("site lookup by id, last site", 100_000, &mut || {
-            std::hint::black_box(registry.enabled("web-19999"));
-        });
-        per("site lookup by host, last site", 100_000, &mut || {
-            std::hint::black_box(
-                registry.site_for_host("inspection", "web-19999.inspection.example"),
-            );
-        });
-        let (site, app) = registry.enabled("inst-big").unwrap();
-        let signer = signers.last().unwrap();
-        let signed = signer.sign_with(
-            "inst-big",
-            "POST",
-            "/broker/token",
-            Some("h"),
-            1,
-            "nonce-nonce-nonce-nonce",
-        );
-        let input = SignatureInput {
-            site_id: "inst-big",
-            method: "POST",
-            path_and_query: "/broker/token",
-            timestamp: 1,
-            nonce: "nonce-nonce-nonce-nonce",
-            handle: Some("h"),
-        };
-        per(
-            "signature check, 500-key installation, by key id",
-            2_000,
-            &mut || {
-                let key = site.verifying_key(app, Some(&signed.key_id)).unwrap();
-                std::hint::black_box(verify(key, &input, &signed.signature));
-            },
-        );
-        per(
-            "refusing an unknown key id, 500-key installation",
-            100_000,
-            &mut || {
-                std::hint::black_box(site.verifying_key(app, Some("not-a-key-id")));
-            },
         );
     }
 }

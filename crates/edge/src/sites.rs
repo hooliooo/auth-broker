@@ -43,7 +43,7 @@ impl Sites {
     /// Reads `dir` for kind `app_id`, whose edge key must be `edge_public_key`: the first read
     /// must be valid, name the kind, and hold this edge's key, or the edge does not start.
     pub fn load(app_id: &str, dir: &str, edge_public_key: &str) -> Result<Self, ConfigError> {
-        let loaded = read(dir)?;
+        let loaded = read(dir, app_id)?;
         let app = loaded
             .registry
             .app(app_id)
@@ -104,7 +104,7 @@ impl Sites {
         let current = self.current();
         match read_documents(&self.dir) {
             Ok((_, version)) if version == current.version => {}
-            Ok(_) => match read(&self.dir) {
+            Ok(_) => match read(&self.dir, &self.app_id) {
                 Ok(loaded) if loaded.registry.app(&self.app_id).is_some() => {
                     info!(version = %loaded.version, "registry reloaded");
                     *self.current.write().unwrap_or_else(PoisonError::into_inner) =
@@ -122,12 +122,14 @@ impl Sites {
     }
 }
 
-/// The registry in `dir`, validated.
-fn read(dir: &str) -> Result<Loaded, ConfigError> {
+/// The registry in `dir`, validated as a whole as the hub validates it, then narrowed to kind
+/// `app_id`, the only one this edge serves.
+fn read(dir: &str, app_id: &str) -> Result<Loaded, ConfigError> {
     let (documents, version) =
         read_documents(dir).map_err(|e| ConfigError::RegistryDir(dir.to_owned(), e))?;
     let registry =
-        Registry::from_documents(documents.iter().map(|(n, t)| (n.as_str(), t.as_str())))?;
+        Registry::from_documents(documents.iter().map(|(n, t)| (n.as_str(), t.as_str())))?
+            .only_kind(app_id);
     Ok(Loaded { registry, version })
 }
 

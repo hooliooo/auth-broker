@@ -25,3 +25,8 @@ subtle.workspace     = true
 thiserror.workspace  = true
 tokio.workspace      = true
 tracing.workspace    = true
+
+[[example]]
+# Registry reload, memory, lookups and signature checks at up to a million installations.
+name = "registry_scale"
+required-features = ["alloc-stats"]

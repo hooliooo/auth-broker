@@ -118,6 +118,12 @@ are.
 
 Check a change before submitting it: `hub validate-registry <dir>`.
 
+The hub and every edge hold the registry in memory, indexed: finding an installation and checking
+a request's signature cost the same at a million installations as at ten. An edge validates the
+whole set, as the hub does, but keeps only its own kind. Memory and reload time grow with the
+registry (about 76 MB and 0.2 s at 100,000 installations); measure them with
+`cargo run --release -p common --example registry_scale --features alloc-stats`.
+
 ## Native installations
 
 An installation that is a desktop app on the customer's premises is **native**: its app signs
