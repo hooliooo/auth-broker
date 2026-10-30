@@ -138,6 +138,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", installation()?.sign_out(&session()?).await?);
             let _ = std::fs::remove_file(session_file());
         }
+        ["enroll-machine"] => {
+            let installation = installation()?;
+            let redirect_path =
+                std::env::var("NATIVE_REDIRECT_PATH").unwrap_or_else(|_| "/callback".into());
+            let sign_in = installation.begin_enrollment(&redirect_path).await?;
+            println!("Sign in as an installation admin to enroll this machine.");
+            open_in_browser(sign_in.url());
+            let session = installation.finish_enrollment(sign_in, SIGN_IN_TIMEOUT).await?;
+            write_private(&session_file(), &session.handle)?;
+            println!("This machine's key {} is enrolled.", installation.key_id());
+        }
         ["enroll", key_file] => {
             let installation = installation()?;
             let new_key = std::fs::read_to_string(key_file)?;
@@ -145,7 +156,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", installation.enroll(&public).await?);
         }
         ["revoke-key", key_id] => installation()?.revoke_key(key_id).await?,
-        _ => return Err("usage: native-app keygen <site> <key file> | sign-in | whoami | token | call <url> | sign-out | enroll <new key file> | revoke-key <key id>".into()),
+        _ => return Err("usage: native-app keygen <site> <key file> | sign-in | whoami | token | call <url> | sign-out | enroll-machine | enroll <new key file> | revoke-key <key id>".into()),
     }
     Ok(())
 }

@@ -236,6 +236,39 @@ impl Installation {
         self.redeem(&code, &sign_in.verifier).await
     }
 
+    /// Starts enrolling this machine: like [`Installation::begin_sign_in`], but the hub enrolls
+    /// this app's key for the installation once the person signing in proves to be one of its
+    /// installation admins. Finish with [`Installation::finish_enrollment`].
+    pub async fn begin_enrollment(&self, redirect_path: &str) -> Result<SignIn, Error> {
+        let mut sign_in = self.begin_sign_in(redirect_path).await?;
+        sign_in
+            .url
+            .query_pairs_mut()
+            .append_pair("enroll_key", &self.public_key());
+        Ok(sign_in)
+    }
+
+    /// Waits for the enrollment's code and redeems it with the newly enrolled key, retrying for
+    /// a few seconds while the hub catches up with the enrollment; a refused signature does not
+    /// use up the code. Returns the admin's session at this machine.
+    pub async fn finish_enrollment(
+        &self,
+        sign_in: SignIn,
+        timeout: Duration,
+    ) -> Result<Session, Error> {
+        let code = sign_in.wait_for_code(timeout).await?;
+        let mut attempts = 0;
+        loop {
+            match self.redeem(&code, &sign_in.verifier).await {
+                Err(Error::Refused(reqwest::StatusCode::UNAUTHORIZED)) if attempts < 20 => {
+                    attempts += 1;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
     /// Trades one-time `code` and PKCE `verifier` for a session, in a signed request.
     pub async fn redeem(&self, code: &str, verifier: &str) -> Result<Session, Error> {
         let response = self

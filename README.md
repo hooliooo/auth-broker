@@ -25,6 +25,7 @@ an edge per kind; see the RFC "One edge per app kind". What changed:
 | `crates/keycloak`                                      | Keycloak as an identity provider (see [Identity providers](#identity-providers))                                                                                                                                                                                                                                         |
 | `crates/native-app`                                    | the desktop side of a native installation: sign-in through the system browser with a loopback redirect, and requests signed with the installation's key (a library, and a command-line stand-in for a desktop app)                                                                                                       |
 | `crates/registry-store`                                | installations and their keys in Postgres, for installations created by provisioning automation and keys enrolled by the installations themselves: the schema, writes stamped with a commit-ordered version, and the change feed the hub follows                                                                          |
+| `crates/org-sync`                                      | the organization sync: one Keycloak organization per installation of every direct kind, following the registry store; the only component with Keycloak admin credentials (`manage-organizations` alone)                                                                                                                  |
 | `crates/test-api`, `crates/test-helpers`, `crates/e2e` | a stand-in API, a Keycloak fault proxy and logout-token recorder, and the end-to-end tests                                                                                                                                                                                                                               |
 | `providers/keycloak`                                   | the Keycloak image with the membership extension (`extension/`), its admin-tools image (`config/`), and the realm and organization scripts (`setup/`)                                                                                                                                                                    |
 | `dev/`                                                 | local key generation, the registry templates, and the local cluster's scripts (`dev/k8s/`)                                                                                                                                                                                                                               |
@@ -183,9 +184,16 @@ documents list no sites.
 - **The hub serves from memory and follows the store.** It loads every installation at start,
   then every `REGISTRY_SYNC_MILLIS` applies only what changed. If the store is down, it keeps
   serving what it has; no request waits on Postgres.
-- **Edges never reach the store.** With `REGISTRY_FROM_HUB=true`, an edge fetches its kind's
-  web-app installations from the hub's `GET /broker/registry?since=<version>`, signed with the
-  kind's key, then only the changes.
+- **Edges never reach the store, and look installations up on demand.** With
+  `REGISTRY_FROM_HUB=true`, an edge asks the hub for a host the first time it sees it
+  (`GET /broker/registry/host?name=<host>`, signed with the kind's key) and caches the answer: an
+  installation for 10 minutes, no installation for 30 seconds. It follows the store's changes
+  through the hub (`GET /broker/registry?since=<version>`) and drops what they touch, so its
+  memory follows the installations in use.
+- **Organizations follow the store.** The organization sync (`crates/org-sync`) creates and updates
+  one Keycloak organization per installation of every direct kind, reading the store through a
+  read-only account; its service account holds `manage-organizations` alone, so the hub never
+  holds Keycloak admin credentials. `org-sync --once` makes one full pass and reports drift.
 - **The rules are constraints.** Ids, origins, each kind's hosts and every key are unique on every
   write; a removed installation's id and a revoked key never come back.
 - **Changes are ordered.** Every write takes the next version from one row and stamps its rows
@@ -202,8 +210,12 @@ The admin API (`ADMIN_ADDR`, for provisioning; a bearer token from the identity 
 | `POST /admin/installations/{id}/keys`           | adds a key (`publicKey`) to a native installation                                           |
 | `DELETE /admin/installations/{id}/keys/{keyId}` | revokes a key                                                                               |
 
-A native installation also manages its own keys, in requests signed with a key it holds:
-`POST /broker/keys` enrolls another (a new workstation; `native-app enroll <key file>`) and
+A native installation also manages its own keys. A new machine enrolls itself: its app makes a
+key and opens the hub's sign-in with it (`enroll_key`), an installation admin signs in on that
+machine, and the hub enrolls the key, recording who approved it (`native-app enroll-machine`).
+An installation admin is a member of the installation's organization with the kind's
+`native.admin_role`, `<kind>-installation-admin` unless the kind names another. A machine that
+holds a key can also enroll another (`POST /broker/keys`, `native-app enroll <key file>`), and
 `DELETE /broker/keys/{keyId}` revokes one (`native-app revoke-key <key id>`). The store checks the
 signing key is still in use, so a revoked key never changes keys; for sign-ins and tokens, a
 revocation takes effect once each hub has followed it, within `REGISTRY_SYNC_MILLIS`.
@@ -375,19 +387,19 @@ right after the hub has reloaded: requests signed with the old key are refused f
 
 ### Edge settings
 
-| Variable                               | Default        | Meaning                                                                                 |
-| -------------------------------------- | -------------- | --------------------------------------------------------------------------------------- |
-| `APP_ID`                               |                | the app kind whose sites this edge serves                                               |
-| `EDGE_KEY_FILE` or `EDGE_KEY`          |                | the kind's Ed25519 private key (base64url PKCS#8)                                       |
-| `REGISTRY_DIR`, `REGISTRY_RELOAD_SECS` | `10`           | the registry files, the same the hub reads                                              |
-| `REGISTRY_FROM_HUB`                    | `false`        | `true`: the kind's installations come from the hub (its store); the files hold the kind |
-| `REGISTRY_SYNC_MILLIS`                 | `1000`         | how often to ask the hub for changes, with `REGISTRY_FROM_HUB`                          |
-| `HUB_URL`, `HUB_INTERNAL_URL`          | `HUB_URL`      | the hub as browsers reach it, and as the edge does                                      |
-| `API_READ_TIMEOUT_SECS`                | `60`           | direct kinds: longest silence from a site's API                                         |
-| `CLIENT_IP_HEADER`, `TRUSTED_PROXIES`  |                | a load balancer's client IP header, believed only from these ranges                     |
-| `LISTEN_ADDR`                          | `0.0.0.0:5200` | address and port                                                                        |
-| `METRICS_ADDR`                         | `0.0.0.0:9100` | Prometheus metrics, apart from the public port (feature `metrics`)                      |
-| `ALLOW_INSECURE_HTTP`                  | `false`        | `true` accepts `http://` URLs; local stacks only                                        |
+| Variable                               | Default        | Meaning                                                                                                        |
+| -------------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------- |
+| `APP_ID`                               |                | the app kind whose sites this edge serves                                                                      |
+| `EDGE_KEY_FILE` or `EDGE_KEY`          |                | the kind's Ed25519 private key (base64url PKCS#8)                                                              |
+| `REGISTRY_DIR`, `REGISTRY_RELOAD_SECS` | `10`           | the registry files, the same the hub reads                                                                     |
+| `REGISTRY_FROM_HUB`                    | `false`        | `true`: the kind's installations are looked up at the hub (its store) as hosts arrive; the files hold the kind |
+| `REGISTRY_SYNC_MILLIS`                 | `1000`         | how often to ask the hub for changes, with `REGISTRY_FROM_HUB`                                                 |
+| `HUB_URL`, `HUB_INTERNAL_URL`          | `HUB_URL`      | the hub as browsers reach it, and as the edge does                                                             |
+| `API_READ_TIMEOUT_SECS`                | `60`           | direct kinds: longest silence from a site's API                                                                |
+| `CLIENT_IP_HEADER`, `TRUSTED_PROXIES`  |                | a load balancer's client IP header, believed only from these ranges                                            |
+| `LISTEN_ADDR`                          | `0.0.0.0:5200` | address and port                                                                                               |
+| `METRICS_ADDR`                         | `0.0.0.0:9100` | Prometheus metrics, apart from the public port (feature `metrics`)                                             |
+| `ALLOW_INSECURE_HTTP`                  | `false`        | `true` accepts `http://` URLs; local stacks only                                                               |
 
 ## Measuring capacity
 
@@ -459,8 +471,10 @@ machine by themselves (Safari does not), so no hosts-file entries are needed:
   Keycloak's own address for the hub only, and a recorder of back-channel logout tokens. The
   tests reach Redis, the hub's metrics, the helpers and the stand-in APIs on `127.0.0.1`
   ports 6380, 8091, 5290 and 8181–8185.
-- **The organization sync** is a suspended CronJob; run it with
+- **The organization sync** follows the store as a Deployment; a suspended CronJob makes one full
+  pass on demand:
   `kubectl --context kind-auth-broker -n auth-broker create job sync-now --from=cronjob/organization-sync`.
+  `test-installation-admin` holds every native kind's installation admin role for the tests.
 
 The cluster uses ports 80 and 443, like `auth-api`'s cluster: run one at a time.
 

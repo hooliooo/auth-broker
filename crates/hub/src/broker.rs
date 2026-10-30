@@ -10,7 +10,7 @@ use axum::{
 use common::{
     metrics, pkce,
     provider::Logout,
-    registry::KindFeed,
+    registry::{HostLookup, KindFeed},
     sealed::{self, Purpose},
 };
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,8 @@ pub fn routes() -> Router<AppState> {
         .route("/broker/keys", post(enroll_key))
         .route("/broker/keys/{key_id}", delete(revoke_key))
         .route("/broker/registry", get(kind_registry))
+        .route("/broker/registry/head", get(kind_registry_head))
+        .route("/broker/registry/host", get(kind_registry_host))
 }
 
 /// `POST /broker/keys`: a native installation, signing with one of its keys, enrolls another, e.g.
@@ -53,6 +55,7 @@ async fn enroll_key(
         &edge.site.id,
         &body.public_key,
         edge.key_id.as_deref(),
+        &format!("key:{}", edge.key_id.as_deref().unwrap_or_default()),
     )
     .await?;
     Ok(no_store(Json(enrolled).into_response()))
@@ -75,14 +78,13 @@ async fn revoke_key(
 /// Query of `/broker/registry`.
 #[derive(Deserialize)]
 struct FeedQuery {
-    /// The store version the edge has; 0 for everything.
-    #[serde(default)]
+    /// The store version the edge has.
     since: i64,
 }
 
-/// `GET /broker/registry?since=<version>`: the kind's web-app installations for its edge, signed
-/// with the kind's key: every current one, or the changes after `since`. Only with a store; edges
-/// never reach the store themselves.
+/// `GET /broker/registry?since=<version>`: the kind's web-app installations changed after
+/// `since`, for its edge to drop what it cached of them; signed with the kind's key. Only with a
+/// store; edges never reach the store themselves.
 async fn kind_registry(
     State(app): State<AppState>,
     kind: SignedKind,
@@ -93,12 +95,59 @@ async fn kind_registry(
         .web_installations(&kind.app.id, q.since)
         .await
         .map_err(|e| AppError::NotReady(e.to_string()))?;
-    let feed = KindFeed {
-        version,
-        full: q.since == 0,
-        changes,
-    };
-    Ok(no_store(Json(feed).into_response()))
+    Ok(no_store(
+        Json(KindFeed { version, changes }).into_response(),
+    ))
+}
+
+/// Answer of `/broker/registry/head`.
+#[derive(Serialize)]
+struct Head {
+    /// The store version the hub's registry is as of.
+    version: i64,
+}
+
+/// `GET /broker/registry/head`: the store version the hub serves, where an edge starts following
+/// changes; signed with the kind's key.
+async fn kind_registry_head(
+    State(app): State<AppState>,
+    _: SignedKind,
+) -> Result<Response, AppError> {
+    let version = app
+        .runtime
+        .catalog()
+        .store_version
+        .ok_or(AppError::NotFound)?;
+    Ok(no_store(Json(Head { version }).into_response()))
+}
+
+/// Query of `/broker/registry/host`.
+#[derive(Deserialize)]
+struct HostQuery {
+    /// The `Host` header the edge received.
+    name: String,
+}
+
+/// `GET /broker/registry/host?name=<host>`: the kind's enabled web-app installation at a host,
+/// from the hub's registry, for an edge looking it up on demand; signed with the kind's key.
+async fn kind_registry_host(
+    State(app): State<AppState>,
+    kind: SignedKind,
+    Query(q): Query<HostQuery>,
+) -> Result<Response, AppError> {
+    let catalog = app.runtime.catalog();
+    let version = catalog.store_version.ok_or(AppError::NotFound)?;
+    let installation = catalog
+        .registry
+        .site_for_host(&kind.app.id, &q.name)
+        .map(|site| site.record());
+    Ok(no_store(
+        Json(HostLookup {
+            version,
+            installation,
+        })
+        .into_response(),
+    ))
 }
 
 /// Body of `/broker/redeem`.

@@ -73,13 +73,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = EdgeConfig::from_env()?;
     let signer = config::load_signer(&config)?;
-    // Refuses to start with a key the registry does not list for this kind.
-    let sites = Arc::new(Sites::load(
-        &config.app_id,
-        &config.registry_dir,
-        &signer.public_key(),
-        config.registry_from_hub,
-    )?);
+    let public_key = signer.public_key();
     // No cap on total duration, so long downloads and streams through the edge are never cut
     // off; only connecting and silence between bytes are bounded.
     let http = Client::builder()
@@ -92,10 +86,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.hub_internal_url.clone(),
         signer,
     ));
+    // Refuses to start with a key the registry does not list for this kind.
+    let sites = Arc::new(Sites::load(
+        &config.app_id,
+        &config.registry_dir,
+        &public_key,
+        config.registry_from_hub.then(|| hub.clone()),
+    )?);
     if config.registry_from_hub {
         tokio::spawn(sites::follow_hub(
             sites.clone(),
-            hub.clone(),
             config.reload_interval,
             config.sync_interval,
         ));

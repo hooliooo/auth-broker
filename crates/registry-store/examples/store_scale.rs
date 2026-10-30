@@ -118,6 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &id,
                     10_000,
                     None,
+                    "measurement",
                 )
                 .await?;
             serial += 1;

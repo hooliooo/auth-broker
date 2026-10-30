@@ -20,7 +20,7 @@ use common::{
     loopback, metrics, pkce,
     provider::IdentityProvider,
     random::random_token,
-    registry::{App, Site},
+    registry::{self, App, Site},
     sealed::{self, Purpose},
     signing,
 };
@@ -32,6 +32,7 @@ use serde_json::Value;
 use tracing::{error, info, warn};
 
 use crate::{
+    admin,
     catalog::AppClient,
     error::AppError,
     ratelimit,
@@ -75,6 +76,11 @@ struct BrokerLoginQuery {
     code_challenge: String,
     /// Must be `S256`.
     code_challenge_method: String,
+    /// For a native installation only: the public key of the machine this sign-in enrolls,
+    /// `ed25519:<base64url>`. The user must be an installation admin; the app redeems the code
+    /// with the new key.
+    #[serde(default)]
+    enroll_key: Option<String>,
 }
 
 /// Sealed with the hub's own `state` while the user is at the provider.
@@ -89,6 +95,10 @@ struct PendingLogin {
     /// For a native installation: where its app listens for the handoff.
     #[serde(default)]
     native_redirect: Option<String>,
+    /// For a native installation's machine enrollment: the key to enroll once an installation
+    /// admin has signed in.
+    #[serde(default)]
+    enroll_key: Option<String>,
     /// The hub's PKCE verifier for the provider.
     verifier: String,
     /// The ID token must carry this nonce.
@@ -185,6 +195,21 @@ async fn broker_login(
         }
         (None, None) => None,
     };
+    // A machine enrollment: only for a native installation, a well-formed key that is no kind's
+    // edge key, and a hub with a store to write it to.
+    if let Some(key) = q.enroll_key.as_deref() {
+        let key = registry::parse_public_key(key)
+            .filter(|_| native_redirect.is_some() && state.store.is_some())
+            .ok_or(AppError::BadRequest("enroll_key is not enrollable here"))?;
+        if catalog
+            .registry
+            .apps()
+            .iter()
+            .any(|app| app.edge_public_key == Some(key))
+        {
+            return Err(AppError::BadRequest("enroll_key is not enrollable here"));
+        }
+    }
 
     // Unauthenticated and writes to Redis, so it is rate limited per client and per site.
     let mut redis = state.redis.clone();
@@ -219,6 +244,7 @@ async fn broker_login(
         edge_state: q.state,
         edge_challenge: q.code_challenge,
         native_redirect,
+        enroll_key: q.enroll_key,
         verifier: verifier.clone(),
         nonce: nonce.clone(),
     };
@@ -444,6 +470,9 @@ async fn complete_sign_in(
                 return Err(AppError::Upstream("access token not usable for this app".into()));
             }
         }
+        if let Some(key) = pending.enroll_key.as_deref() {
+            enroll_machine(state, app, site, key, &tokens.access_token, &claims.sub).await?;
+        }
 
         let issued_at = now();
         let handoff = Handoff {
@@ -537,6 +566,38 @@ async fn exchange_code(
         .await
         .map_err(|e| AppError::Upstream(with_causes(&e)))?;
     Ok((serde_json::from_value(body.clone())?, body))
+}
+
+/// Enrolls `key` for native installation `site` of `app`, approved by user `sub`, whose
+/// `access_token` must carry the kind's installation admin role; the token's check for the
+/// site's membership has already passed. Refuses with 403 otherwise.
+async fn enroll_machine(
+    state: &AppState,
+    app: &App,
+    site: &Site,
+    key: &str,
+    access_token: &str,
+    sub: &str,
+) -> Result<(), AppError> {
+    let admin_role = app.native.as_ref().map(|native| native.admin_role.as_str());
+    if !admin_role
+        .is_some_and(|role| tokens::has_role(state.config.provider.as_ref(), access_token, role))
+    {
+        return Err(AppError::Forbidden(
+            "user may not enroll machines for this installation",
+        ));
+    }
+    let enrolled_by = format!("user:{sub}");
+    match admin::enroll(state, &site.id, key, None, &enrolled_by).await {
+        Ok(_) => Ok(()),
+        Err(admin::AdminError::Unavailable(why)) => Err(AppError::NotReady(why)),
+        Err(error) => {
+            warn!(site = %site.id, ?error, "machine not enrolled");
+            Err(AppError::BadRequest(
+                "the machine's key could not be enrolled",
+            ))
+        }
+    }
 }
 
 /// `GET /broker/logged-out/{site}`: the provider's post-logout redirect; bounces to the

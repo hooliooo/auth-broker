@@ -76,7 +76,7 @@ async fn given_writes_then_versions_rise_and_readers_catch_up_with_only_the_chan
         .await
         .unwrap();
     let v3 = store
-        .add_key("plant-i", &[1; 32], "key-1", 10, None)
+        .add_key("plant-i", &[1; 32], "key-1", 10, None, "test")
         .await
         .unwrap();
     assert!(v1 < v2 && v2 < v3);
@@ -178,17 +178,21 @@ async fn given_writes_that_break_the_rules_then_the_store_refuses_them() {
 
     // Keys: only for native installations, unique for ever, bounded per installation.
     assert_eq!(
-        conflict(store.add_key("plant-a", &[1; 32], "k1", 10, None).await),
+        conflict(
+            store
+                .add_key("plant-a", &[1; 32], "k1", 10, None, "test")
+                .await
+        ),
         "a web-app installation has no keys of its own"
     );
     store
-        .add_key("plant-i", &[1; 32], "k1", 10, None)
+        .add_key("plant-i", &[1; 32], "k1", 10, None, "test")
         .await
         .unwrap();
     assert_eq!(
         conflict(
             store
-                .add_key("plant-j", &[1; 32], "k1-again", 10, None)
+                .add_key("plant-j", &[1; 32], "k1-again", 10, None, "test")
                 .await
         ),
         "this key is, or was, another key in the registry"
@@ -196,21 +200,27 @@ async fn given_writes_that_break_the_rules_then_the_store_refuses_them() {
     store.revoke_key("plant-i", "k1", None).await.unwrap();
     assert!(
         store
-            .add_key("plant-i", &[1; 32], "k1", 10, None)
+            .add_key("plant-i", &[1; 32], "k1", 10, None, "test")
             .await
             .is_err(),
         "a revoked key never returns"
     );
     store
-        .add_key("plant-i", &[2; 32], "k2", 1, None)
+        .add_key("plant-i", &[2; 32], "k2", 1, None, "test")
         .await
         .unwrap();
     assert_eq!(
-        conflict(store.add_key("plant-i", &[3; 32], "k3", 1, None).await),
+        conflict(
+            store
+                .add_key("plant-i", &[3; 32], "k3", 1, None, "test")
+                .await
+        ),
         "the installation holds its most keys"
     );
     assert!(matches!(
-        store.add_key("plant-z", &[4; 32], "k4", 10, None).await,
+        store
+            .add_key("plant-z", &[4; 32], "k4", 10, None, "test")
+            .await,
         Err(StoreError::NotFound)
     ));
 
@@ -299,17 +309,17 @@ async fn given_a_revoked_signer_then_it_can_no_longer_change_the_installations_k
         .await
         .unwrap();
     store
-        .add_key("plant-i", &[1; 32], "k1", 10, None)
+        .add_key("plant-i", &[1; 32], "k1", 10, None, "test")
         .await
         .unwrap();
     store
-        .add_key("plant-i", &[2; 32], "k2", 10, Some("k1"))
+        .add_key("plant-i", &[2; 32], "k2", 10, Some("k1"), "test")
         .await
         .unwrap();
     store.revoke_key("plant-i", "k1", Some("k2")).await.unwrap();
     assert!(matches!(
         store
-            .add_key("plant-i", &[3; 32], "k3", 10, Some("k1"))
+            .add_key("plant-i", &[3; 32], "k3", 10, Some("k1"), "test")
             .await,
         Err(StoreError::SignerRevoked)
     ));
@@ -320,7 +330,7 @@ async fn given_a_revoked_signer_then_it_can_no_longer_change_the_installations_k
     assert!(
         matches!(
             store
-                .add_key("plant-j", &[3; 32], "k3", 10, Some("k2"))
+                .add_key("plant-j", &[3; 32], "k3", 10, Some("k2"), "test")
                 .await,
             Err(StoreError::SignerRevoked | StoreError::NotFound)
         ),
@@ -337,11 +347,11 @@ async fn given_an_installation_then_its_stored_form_shows_every_key() {
         .await
         .unwrap();
     store
-        .add_key("plant-i", &[1; 32], "k1", 10, None)
+        .add_key("plant-i", &[1; 32], "k1", 10, None, "test")
         .await
         .unwrap();
     store
-        .add_key("plant-i", &[2; 32], "k2", 10, None)
+        .add_key("plant-i", &[2; 32], "k2", 10, None, "test")
         .await
         .unwrap();
     store.revoke_key("plant-i", "k1", None).await.unwrap();

@@ -1,8 +1,55 @@
-# The organization sync (providers/keycloak/setup/sync_organizations.sh): one organization per
-# site of every direct kind, from the registry, and a report of drift. In production it would
-# run on a schedule or after each registry change; here it is suspended and run on demand:
+# The organization sync (crates/org-sync): one Keycloak organization per installation of every
+# direct kind, following the registry store. It reads the store through a read-only account
+# (organization_sync) and is the only component with Keycloak admin credentials: the
+# organization-sync service account, which holds manage-organizations and nothing more.
+#
+# The Deployment follows the store for good; the suspended CronJob makes one full pass and
+# reports drift, on demand:
 #   kubectl --context kind-auth-broker -n auth-broker create job sync-now --from=cronjob/organization-sync
 # The e2e tests run it that way.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: organization-sync
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: organization-sync }
+  template:
+    metadata:
+      labels: { app: organization-sync }
+    spec:
+      containers:
+        - name: sync
+          image: auth-broker-kind-edge:dev
+          imagePullPolicy: Never
+          args: ["org-sync"]
+          env:
+            - { name: RUST_LOG, value: "org_sync=info,info" }
+            - name: ORG_SYNC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: registry-db-organization-sync, key: password }
+            - name: REGISTRY_DATABASE_URL
+              value: "postgres://organization_sync:$(ORG_SYNC_DB_PASSWORD)@registry-postgres:5432/registry"
+            - { name: REGISTRY_DIR, value: /etc/org-sync/registry/kinds }
+            - { name: KEYCLOAK_URL, value: "http://keycloak:8080" }
+            - { name: REALM, value: broker }
+            - { name: ORG_SYNC_CLIENT_ID, value: organization-sync }
+            - name: ORG_SYNC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: organization-sync, key: secret }
+            - { name: ORG_SYNC_MILLIS, value: "1000" }
+          volumeMounts:
+            - { name: registry, mountPath: /etc/org-sync/registry, readOnly: true }
+          resources:
+            requests: { cpu: 20m, memory: 16Mi }
+            limits: { memory: 128Mi }
+      volumes:
+        - name: registry
+          hostPath:
+            path: /registry
+            type: Directory
+---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -19,25 +66,26 @@ spec:
           restartPolicy: Never
           containers:
             - name: sync
-              image: auth-broker-kind-edge-keycloak-config:dev
+              image: auth-broker-kind-edge:dev
               imagePullPolicy: Never
-              command: ["bash", "/mnt/setup/sync_organizations.sh"]
+              args: ["org-sync", "--once"]
               env:
-                - { name: keycloak_url, value: "http://keycloak:8080" }
-                - name: KEYCLOAK_ADMIN
+                - { name: RUST_LOG, value: "org_sync=info,info" }
+                - name: ORG_SYNC_DB_PASSWORD
                   valueFrom:
-                    secretKeyRef: { name: keycloak-admin, key: username }
-                - name: KEYCLOAK_ADMIN_PASSWORD
+                    secretKeyRef: { name: registry-db-organization-sync, key: password }
+                - name: REGISTRY_DATABASE_URL
+                  value: "postgres://organization_sync:$(ORG_SYNC_DB_PASSWORD)@registry-postgres:5432/registry"
+                - { name: REGISTRY_DIR, value: /etc/org-sync/registry/kinds }
+                - { name: KEYCLOAK_URL, value: "http://keycloak:8080" }
+                - { name: REALM, value: broker }
+                - { name: ORG_SYNC_CLIENT_ID, value: organization-sync }
+                - name: ORG_SYNC_CLIENT_SECRET
                   valueFrom:
-                    secretKeyRef: { name: keycloak-admin, key: password }
-                - { name: realm, value: broker }
+                    secretKeyRef: { name: organization-sync, key: secret }
               volumeMounts:
-                - { name: setup, mountPath: /mnt/setup, readOnly: true }
-                - { name: registry, mountPath: /mnt/registry, readOnly: true }
+                - { name: registry, mountPath: /etc/org-sync/registry, readOnly: true }
           volumes:
-            - name: setup
-              configMap:
-                name: keycloak-setup-scripts
             - name: registry
               hostPath:
                 path: /registry

@@ -96,6 +96,9 @@ struct NativeEntry {
     /// See [`Native::redirect_path`].
     #[serde(default = "default_redirect_path")]
     redirect_path: String,
+    /// See [`Native::admin_role`]; `<kind>-installation-admin` if absent.
+    #[serde(default)]
+    admin_role: Option<String>,
 }
 
 /// The path of a native app's loopback redirect unless its kind names another.
@@ -193,6 +196,10 @@ pub struct Native {
     /// browser to `http://127.0.0.1:<any port><path>` (or `[::1]`), where the app listens
     /// (RFC 8252 §7.3).
     pub redirect_path: String,
+    /// The realm role, beside membership of the installation's organization, a user needs to
+    /// approve a new machine of the installation: its app makes a key, the user signs in on it,
+    /// and the hub enrolls the key.
+    pub admin_role: String,
 }
 
 /// What an installation runs, and so how it reaches the hub. Every place the hub and the edge
@@ -336,6 +343,26 @@ impl Site {
         match &self.access {
             Access::Web { .. } => &[],
             Access::Native { keys } => keys.as_slice(),
+        }
+    }
+
+    /// The installation as a store's record, with its keys in use.
+    pub fn record(&self) -> InstallationRecord {
+        InstallationRecord {
+            id: self.id.clone(),
+            kind: self.app_id.clone(),
+            origin: self
+                .origin()
+                .map(|origin| origin.as_str().trim_end_matches('/').to_owned()),
+            keys: self
+                .keys()
+                .iter()
+                .map(|key| format!("{KEY_PREFIX}{}", URL_SAFE_NO_PAD.encode(key.key)))
+                .collect(),
+            api_url: self.api_url.as_ref().map(|url| url.as_str().to_owned()),
+            tenant: self.tenant.clone(),
+            enabled: self.enabled,
+            login_per_minute: Some(self.login_per_minute),
         }
     }
 
@@ -560,17 +587,25 @@ pub struct InstallationRecord {
     pub login_per_minute: Option<u64>,
 }
 
-/// A kind's web-app installations as the hub sends them to the kind's edge: every current one
-/// when `full`, otherwise those that changed after the version the edge asked from, a removed
-/// one as `None`.
+/// A kind's web-app installations that changed after the version its edge asked from, as the
+/// hub sends them: each with its record, or `None` if removed. The edge drops what it cached of
+/// them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KindFeed {
     /// The store version this is as of; the edge asks from it next.
     pub version: i64,
-    /// Whether `changes` holds every current installation rather than changes.
-    pub full: bool,
     /// Each installation by id, with its record or `None` if removed.
     pub changes: Vec<(String, Option<InstallationRecord>)>,
+}
+
+/// The hub's answer to an edge looking up a host: the kind's enabled web-app installation there,
+/// if any, and the store version the hub serves.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostLookup {
+    /// The store version the hub's registry is as of.
+    pub version: i64,
+    /// The installation, or `None` if the kind has no enabled one at the host.
+    pub installation: Option<InstallationRecord>,
 }
 
 impl InstallationRecord {
@@ -585,12 +620,6 @@ impl InstallationRecord {
             enabled: self.enabled,
             login_per_minute: self.login_per_minute,
         }
-    }
-
-    /// Whether this is a native installation that has no key yet: it can do nothing until one
-    /// is enrolled, so registries leave it out.
-    pub fn awaits_a_key(&self) -> bool {
-        self.origin.is_none() && self.keys.is_empty()
     }
 }
 
@@ -737,7 +766,7 @@ impl Registry {
     /// This registry's kinds with exactly `records` as their installations, from a store that
     /// has kept ids, origins, host keys and keys unique. A record that fails validation, names
     /// an unknown kind or repeats what an earlier one holds is left out and returned with the
-    /// reason; a native installation awaiting its first key is left out silently.
+    /// reason.
     pub fn with_installations(
         &self,
         records: impl IntoIterator<Item = InstallationRecord>,
@@ -747,8 +776,7 @@ impl Registry {
         keys.extend(self.apps.iter().filter_map(|app| app.edge_public_key));
         for record in records {
             let site = match self.validate_record(&record) {
-                Ok(Some(site)) => site,
-                Ok(None) => continue,
+                Ok(site) => site,
                 Err(error) => {
                     rejected.push((record.id, error));
                     continue;
@@ -782,7 +810,7 @@ impl Registry {
         let mut rejected = Vec::new();
         for (id, record) in changes {
             let site = record.and_then(|record| match self.validate_record(&record) {
-                Ok(site) => site,
+                Ok(site) => Some(site),
                 Err(error) => {
                     rejected.push((id.clone(), error));
                     None
@@ -817,16 +845,13 @@ impl Registry {
         self.changes.sites.len()
     }
 
-    /// `record` as a site of its kind, or `None` for a native installation awaiting its first
-    /// key.
-    fn validate_record(&self, record: &InstallationRecord) -> Result<Option<Site>, RegistryError> {
-        if record.awaits_a_key() {
-            return Ok(None);
-        }
+    /// `record` as a site of its kind. A native installation may still await its first key: it
+    /// can sign nothing, but an installation admin can enroll a machine for it.
+    fn validate_record(&self, record: &InstallationRecord) -> Result<Site, RegistryError> {
         let app = self
             .app(&record.kind)
             .ok_or_else(|| RegistryError::UnknownKind(record.id.clone(), record.kind.clone()))?;
-        validate_site(record.entry(), app, false).map(Some)
+        validate_site(record.entry(), app, true)
     }
 
     /// This registry narrowed to kind `app_id` and its sites, re-indexed. For an edge, which
@@ -1016,6 +1041,9 @@ fn validate_app(entry: AppEntry) -> Result<App, RegistryError> {
             if plain {
                 Ok(Native {
                     redirect_path: native.redirect_path,
+                    admin_role: native
+                        .admin_role
+                        .unwrap_or_else(|| format!("{id}-installation-admin")),
                 })
             } else {
                 Err(RegistryError::InvalidRedirectPath(id.clone()))
@@ -1536,10 +1564,10 @@ mod tests {
                 ..record("plant-c", None, &["c"])
             },
         ]);
-        assert_eq!(r.site_count(), 2);
+        assert_eq!(r.site_count(), 3);
         assert!(
-            r.get("plant-new").is_none(),
-            "awaits its first key, silently"
+            r.get("plant-new").unwrap().keys().is_empty(),
+            "awaits its first key"
         );
         let reasons: Vec<&str> = rejected.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(reasons, ["plant-x", "plant-c"]);

@@ -48,6 +48,18 @@ create table if not exists installation_keys (
     revoked boolean not null default false,
     version bigint not null
 );
+-- Who enrolled the key: provisioning:<client>, key:<key id> for another of the installation's
+-- keys, user:<subject> for an installation admin, or import.
+alter table installation_keys add column if not exists enrolled_by text;
 create index if not exists installation_keys_installation
     on installation_keys (installation_id) where not revoked;
 create index if not exists installation_keys_version on installation_keys (version);
+
+-- What the organization sync may read, if its role exists: nothing it could change.
+do $$
+begin
+    if exists (select 1 from pg_roles where rolname = 'organization_sync') then
+        grant select on registry_head, installations to organization_sync;
+    end if;
+end
+$$;

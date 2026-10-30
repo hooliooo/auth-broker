@@ -131,6 +131,8 @@ random() { openssl rand -base64 24 | tr -d '/+=' | head -c 24; }
 secret_once keycloak-admin username=admin "password=$(random)"
 secret_once keycloak-db "password=$(random)"
 secret_once registry-db "password=$(random)"
+secret_once registry-db-organization-sync "password=$(random)"
+secret_once organization-sync "secret=$(random)"
 # This machine's keys (dev/keys), replaced whenever they change.
 k -n "$ns" create secret generic hub-client-key \
   --from-file=hub-client-key.pem="$root/dev/keys/hub-client-key.pem" \
@@ -175,6 +177,17 @@ if ! k -n "$ns" wait job registry-seed --for=condition=Complete --timeout=300s; 
   exit 1
 fi
 k -n "$ns" logs job/registry-seed
+# The organization sync's read-only account: it may read installations, nothing more.
+org_sync_password="$(k -n "$ns" get secret registry-db-organization-sync -o jsonpath='{.data.password}' | base64 -d)"
+k -n "$ns" exec statefulset/registry-postgres -- psql -q -U hub -d registry -v ON_ERROR_STOP=1 -c "
+  do \$\$ begin
+    if not exists (select 1 from pg_roles where rolname = 'organization_sync') then
+      create role organization_sync login;
+    end if;
+  end \$\$;
+  alter role organization_sync password '$org_sync_password';
+  revoke all on all tables in schema public from organization_sync;
+  grant select on registry_head, installations to organization_sync;"
 
 step "Broker"
 # Restarts the deployments named, and returns once only their new pods are left: a rollout
@@ -199,6 +212,7 @@ restart test-helpers
 restart api-inspection api-billing api-plant-d api-plant-e api-planner
 restart hub
 restart edge-inspection edge-billing edge-maintenance
+restart organization-sync
 for certificate in hub-tls registry-admin-tls edge-inspection-tls edge-billing-tls edge-maintenance-tls; do
   k -n "$ns" wait certificate "$certificate" --for=condition=Ready --timeout=120s
 done

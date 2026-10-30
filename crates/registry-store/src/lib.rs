@@ -70,6 +70,23 @@ pub struct StoredKey {
     pub public_key: String,
     /// Whether it was revoked; revoked keys stay, so they are never reused.
     pub revoked: bool,
+    /// Who enrolled it: `provisioning:<client>`, `key:<key id>`, `user:<subject>` or `import`.
+    pub enrolled_by: Option<String>,
+}
+
+/// What the organization sync needs of an installation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstallationState {
+    /// The installation's id, its organization's alias.
+    pub id: String,
+    /// Its app kind.
+    pub kind: String,
+    /// Its tenant, the organization's attribute.
+    pub tenant: String,
+    /// Whether it may sign in.
+    pub enabled: bool,
+    /// Whether it was removed.
+    pub removed: bool,
 }
 
 /// An installation as stored, with every key it ever had.
@@ -182,6 +199,38 @@ impl Store {
         changes(&rows, version)
     }
 
+    /// Every installation's state, removed ones included, and the version it is as of: for the
+    /// organization sync's full pass.
+    pub async fn installation_states(&self) -> Result<(i64, Vec<InstallationState>), StoreError> {
+        let mut tx = self.snapshot().await?;
+        let version = head(&mut tx).await?;
+        let rows = sqlx::query("select id, kind, tenant, enabled, removed from installations")
+            .fetch_all(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok((version, rows.iter().map(state).collect::<Result<_, _>>()?))
+    }
+
+    /// The states of installations that changed after version `since`; keys do not matter to
+    /// organizations.
+    pub async fn states_since(
+        &self,
+        since: i64,
+    ) -> Result<(i64, Vec<InstallationState>), StoreError> {
+        let mut tx = self.snapshot().await?;
+        let version = head(&mut tx).await?;
+        let rows = sqlx::query(
+            "select id, kind, tenant, enabled, removed from installations \
+             where version > $1 and version <= $2",
+        )
+        .bind(since)
+        .bind(version)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok((version, rows.iter().map(state).collect::<Result<_, _>>()?))
+    }
+
     /// Installation `id` as stored, with every key it ever had.
     pub async fn installation(&self, id: &str) -> Result<StoredInstallation, StoreError> {
         let row = sqlx::query(records_where!("i.id = $1"))
@@ -190,7 +239,7 @@ impl Store {
             .await?
             .ok_or(StoreError::NotFound)?;
         let keys = sqlx::query(
-            "select key_id, public_key, revoked from installation_keys \
+            "select key_id, public_key, revoked, enrolled_by from installation_keys \
              where installation_id = $1 order by key_id",
         )
         .bind(id)
@@ -202,6 +251,7 @@ impl Store {
                 key_id: row.try_get("key_id")?,
                 public_key: key_text(&row.try_get::<Vec<u8>, _>("public_key")?),
                 revoked: row.try_get("revoked")?,
+                enrolled_by: row.try_get("enrolled_by")?,
             })
         })
         .collect::<Result<_, sqlx::Error>>()?;
@@ -247,8 +297,9 @@ impl Store {
     }
 
     /// Adds `key`, with id `key_id`, to native installation `installation_id`, which may then
-    /// hold at most `max_keys` keys in use. With `signer`, the installation's own key making the
-    /// change, which must still be in use. Returns the new version.
+    /// hold at most `max_keys` keys in use, recording `enrolled_by`. With `signer`, the
+    /// installation's own key making the change, which must still be in use. Returns the new
+    /// version.
     pub async fn add_key(
         &self,
         installation_id: &str,
@@ -256,6 +307,7 @@ impl Store {
         key_id: &str,
         max_keys: i64,
         signer: Option<&str>,
+        enrolled_by: &str,
     ) -> Result<i64, StoreError> {
         let mut tx = self.pool.begin().await?;
         let version = next_version(&mut tx).await?;
@@ -285,13 +337,14 @@ impl Store {
             return Err(StoreError::Conflict("the installation holds its most keys"));
         }
         sqlx::query(
-            "insert into installation_keys (key_id, public_key, installation_id, version) \
-             values ($1, $2, $3, $4)",
+            "insert into installation_keys (key_id, public_key, installation_id, version, enrolled_by) \
+             values ($1, $2, $3, $4, $5)",
         )
         .bind(key_id)
         .bind(key.as_slice())
         .bind(installation_id)
         .bind(version)
+        .bind(enrolled_by)
         .execute(&mut *tx)
         .await
         .map_err(conflict)?;
@@ -340,8 +393,8 @@ impl Store {
             }
             for (key, key_id) in keys {
                 sqlx::query(
-                    "insert into installation_keys (key_id, public_key, installation_id, version) \
-                     values ($1, $2, $3, $4) on conflict (key_id) do nothing",
+                    "insert into installation_keys (key_id, public_key, installation_id, version, enrolled_by) \
+                     values ($1, $2, $3, $4, 'import') on conflict (key_id) do nothing",
                 )
                 .bind(key_id)
                 .bind(key.as_slice())
@@ -478,6 +531,17 @@ fn record(row: &PgRow) -> Result<InstallationRecord, sqlx::Error> {
         login_per_minute: row
             .try_get::<Option<i64>, _>("login_per_minute")?
             .and_then(|rate| u64::try_from(rate).ok()),
+    })
+}
+
+/// The installation state in `row`.
+fn state(row: &PgRow) -> Result<InstallationState, sqlx::Error> {
+    Ok(InstallationState {
+        id: row.try_get("id")?,
+        kind: row.try_get("kind")?,
+        tenant: row.try_get("tenant")?,
+        enabled: row.try_get("enabled")?,
+        removed: row.try_get("removed")?,
     })
 }
 

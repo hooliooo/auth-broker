@@ -15,6 +15,7 @@ members = [
   "crates/test-helpers",
   "crates/native-app",
   "crates/registry-store",
+  "crates/org-sync",
 ]
 
 [workspace.dependencies]

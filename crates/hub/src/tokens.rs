@@ -29,6 +29,11 @@ fn claims(token: &str) -> Option<Value> {
     serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()
 }
 
+/// Whether `access_token`, read the way `provider` writes tokens, carries realm role `role`.
+pub fn has_role(provider: &dyn IdentityProvider, access_token: &str, role: &str) -> bool {
+    claims(access_token).is_some_and(|claims| provider.roles(&claims).iter().any(|r| r == role))
+}
+
 /// Whether `access_token` may be used for `app` at site `site_id`, read the way
 /// `provider` writes tokens: an access token, the right audience, the required role if any, and
 /// for a direct kind exactly the site.

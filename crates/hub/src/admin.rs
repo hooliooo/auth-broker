@@ -94,8 +94,8 @@ impl From<StoreError> for AdminError {
     }
 }
 
-/// A caller whose token carries the admin audience and role.
-pub struct Admin;
+/// A caller whose token carries the admin audience and role: the provisioning client, by id.
+pub struct Admin(String);
 
 impl FromRequestParts<AppState> for Admin {
     type Rejection = AdminError;
@@ -134,7 +134,8 @@ impl FromRequestParts<AppState> for Admin {
         if !has_role {
             return Err(AdminError::Forbidden);
         }
-        Ok(Self)
+        let client = claims["azp"].as_str().unwrap_or("unknown").to_owned();
+        Ok(Self(client))
     }
 }
 
@@ -250,11 +251,14 @@ pub struct KeyBody {
 /// `POST /admin/installations/{id}/keys`: adds a key to native installation `id`.
 async fn add_key(
     State(state): State<AppState>,
-    _: Admin,
+    Admin(client): Admin,
     Path(id): Path<String>,
     Json(body): Json<KeyBody>,
 ) -> Result<Json<Value>, AdminError> {
-    enroll(&state, &id, &body.public_key, None).await.map(Json)
+    let enrolled_by = format!("provisioning:{client}");
+    enroll(&state, &id, &body.public_key, None, &enrolled_by)
+        .await
+        .map(Json)
 }
 
 /// `DELETE /admin/installations/{id}/keys/{key_id}`: revokes one of installation `id`'s keys.
@@ -266,14 +270,16 @@ async fn revoke_key(
     revoke(&state, &id, &key_id, None).await.map(Json)
 }
 
-/// Adds `public_key` to native installation `installation_id`; for provisioning, or for an
-/// installation enrolling its own workstations with `signer`, the key id that signed, which the
-/// store checks is still in use. Answers with the key's id and the new version.
+/// Adds `public_key` to native installation `installation_id`, recording `enrolled_by`: for
+/// provisioning, for an installation admin approving a new machine, or for an installation
+/// enrolling another machine with `signer`, the key id that signed, which the store checks is
+/// still in use. Answers with the key's id and the new version.
 pub async fn enroll(
     state: &AppState,
     installation_id: &str,
     public_key: &str,
     signer: Option<&str>,
+    enrolled_by: &str,
 ) -> Result<Value, AdminError> {
     let store = store(state)?;
     let key = parse_public_key(public_key).ok_or_else(|| {
@@ -290,7 +296,14 @@ pub async fn enroll(
     }
     let key_id = key_id(&key);
     let version = store
-        .add_key(installation_id, &key, &key_id, MAX_KEYS, signer)
+        .add_key(
+            installation_id,
+            &key,
+            &key_id,
+            MAX_KEYS,
+            signer,
+            enrolled_by,
+        )
         .await?;
     info!(installation = installation_id, %key_id, version, "installation key enrolled");
     Ok(json!({ "keyId": key_id, "version": version }))

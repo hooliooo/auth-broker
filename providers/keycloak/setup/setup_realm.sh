@@ -119,6 +119,34 @@ JSON
 fi
 bash "$(dirname "$0")/sync_organizations.sh"
 
+# The organization sync's service account: manage-organizations and nothing more, so the one
+# component holding Keycloak admin credentials can only create and change organizations.
+if [[ -n "${organization_sync_secret:-}" ]]; then
+  sync_client=$($kcadm get clients -r "$realm" -q clientId=organization-sync --fields id | jq -r '.[0].id // empty')
+  if [[ -z "$sync_client" ]]; then
+    echo "creating client organization-sync"
+    $kcadm create clients -r "$realm" -s clientId=organization-sync -s publicClient=false \
+      -s clientAuthenticatorType=client-secret -s "secret=$organization_sync_secret" \
+      -s standardFlowEnabled=false -s directAccessGrantsEnabled=false -s serviceAccountsEnabled=true
+    $kcadm add-roles -r "$realm" --uusername service-account-organization-sync --cclientid realm-management \
+      --rolename manage-organizations --rolename view-organizations --rolename query-organizations
+  else
+    $kcadm update -r "$realm" "clients/$sync_client" -s "secret=$organization_sync_secret"
+  fi
+fi
+
+# Installation admins: per kind with native installations, a realm role that, with membership of
+# an installation's organization, lets a user approve a new machine there. The kind's client
+# carries it in its tokens.
+for kind in ${native_kinds:-}; do
+  role="$kind-installation-admin"
+  if ! $kcadm get roles -r "$realm" --fields name | grep -q "\"$role\""; then
+    $kcadm create roles -r "$realm" -s "name=$role"
+    uuid=$($kcadm get clients -r "$realm" -q "clientId=hub-$kind" --fields id | jq -r '.[0].id')
+    $kcadm create -r "$realm" "clients/$uuid/scope-mappings/realm" -b "[$($kcadm get -r "$realm" "roles/$role")]"
+  fi
+done
+
 # The registry admin API's provisioning client: a service account whose access tokens carry the
 # admin audience and realm role the hub's admin API requires. Its secret comes from the
 # environment and is updated on every run.
@@ -205,6 +233,16 @@ else
   done
   create_user test-user-norole '[]'
   create_user test-user-outsider '["/test-users"]'
+fi
+# An installation admin for the tests: every kind's role from the pool's group, and each native
+# kind's installation admin role; its memberships are the tests' to give.
+if [[ -n "${native_kinds:-}" ]]; then
+  if ! $kcadm get users -r "$realm" -q username=test-installation-admin -q exact=true --fields username | grep -q installation-admin; then
+    create_user test-installation-admin '["/test-users"]'
+  fi
+  for kind in $native_kinds; do
+    $kcadm add-roles -r "$realm" --uusername test-installation-admin --rolename "$kind-installation-admin"
+  done
 fi
 # Every kind's role for the pool, including kinds added since the users were made.
 for kind in $app_kinds; do

@@ -47,6 +47,12 @@ spec:
             - name: registry_provisioner_secret
               valueFrom:
                 secretKeyRef: { name: registry-provisioner, key: secret }
+            # The organization sync's service account, and the kinds with native installations,
+            # whose installation admins approve new machines.
+            - name: organization_sync_secret
+              valueFrom:
+                secretKeyRef: { name: organization-sync, key: secret }
+            - { name: native_kinds, value: "inspection planner" }
           volumeMounts:
             - { name: setup, mountPath: /mnt/setup, readOnly: true }
             - { name: registry, mountPath: /mnt/registry, readOnly: true }

@@ -15,8 +15,8 @@ use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use support::*;
 
-/// The admin API's answer to `method` on `path` with `body`, as status and JSON.
-async fn admin(
+/// The registry admin API's answer to `method` on `path` with `body`, as status and JSON.
+async fn registry_admin(
     token: &str,
     method: Method,
     path: &str,
@@ -66,7 +66,7 @@ async fn given_a_provisioned_web_installation_then_its_kinds_edge_and_the_hub_se
     });
     let path = format!("/admin/installations/{id}");
     assert_eq!(
-        admin(&token, Method::PUT, &path, Some(installation.clone()))
+        registry_admin(&token, Method::PUT, &path, Some(installation.clone()))
             .await
             .0,
         StatusCode::OK
@@ -83,7 +83,7 @@ async fn given_a_provisioned_web_installation_then_its_kinds_edge_and_the_hub_se
 
     installation["enabled"] = json!(false);
     assert_eq!(
-        admin(&token, Method::PUT, &path, Some(installation.clone()))
+        registry_admin(&token, Method::PUT, &path, Some(installation.clone()))
             .await
             .0,
         StatusCode::OK
@@ -99,15 +99,15 @@ async fn given_a_provisioned_web_installation_then_its_kinds_edge_and_the_hub_se
     );
 
     assert_eq!(
-        admin(&token, Method::DELETE, &path, None).await.0,
+        registry_admin(&token, Method::DELETE, &path, None).await.0,
         StatusCode::OK
     );
-    let (status, stored) = admin(&token, Method::GET, &path, None).await;
+    let (status, stored) = registry_admin(&token, Method::GET, &path, None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stored["removed"], true);
     installation["enabled"] = json!(true);
     assert_eq!(
-        admin(&token, Method::PUT, &path, Some(installation))
+        registry_admin(&token, Method::PUT, &path, Some(installation))
             .await
             .0,
         StatusCode::CONFLICT,
@@ -125,7 +125,7 @@ async fn given_a_provisioned_native_installation_then_its_workstations_enroll_an
     let installation =
         json!({ "kind": "planner", "tenant": "customer-x", "apiUrl": "http://localhost:8185" });
     assert_eq!(
-        admin(&token, Method::PUT, &path, Some(installation))
+        registry_admin(&token, Method::PUT, &path, Some(installation))
             .await
             .0,
         StatusCode::OK
@@ -133,7 +133,7 @@ async fn given_a_provisioned_native_installation_then_its_workstations_enroll_an
 
     // Provisioning gives the installation its first key...
     let (first_key, first_public) = new_key();
-    let (status, enrolled) = admin(
+    let (status, enrolled) = registry_admin(
         &token,
         Method::POST,
         &format!("{path}/keys"),
@@ -176,7 +176,7 @@ async fn given_a_provisioned_native_installation_then_its_workstations_enroll_an
         "a revoked key is refused everywhere"
     );
 
-    let (_, stored) = admin(&token, Method::GET, &path, None).await;
+    let (_, stored) = registry_admin(&token, Method::GET, &path, None).await;
     let keys = stored["keys"].as_array().unwrap();
     assert_eq!(keys.len(), 3);
     assert_eq!(keys.iter().filter(|k| k["revoked"] == true).count(), 1);
@@ -195,7 +195,7 @@ async fn given_admin_requests_without_a_valid_token_or_breaking_the_rules_then_t
     let body = json!({ "kind": "planner", "tenant": "t", "apiUrl": "http://localhost:8185" });
     for token in ["", "not-a-token"] {
         assert_eq!(
-            admin(token, Method::PUT, &probe, Some(body.clone()))
+            registry_admin(token, Method::PUT, &probe, Some(body.clone()))
                 .await
                 .0,
             StatusCode::UNAUTHORIZED
@@ -232,13 +232,15 @@ async fn given_admin_requests_without_a_valid_token_or_breaking_the_rules_then_t
     ];
     for (body, status, why) in refusals {
         assert_eq!(
-            admin(&token, Method::PUT, &probe, Some(body)).await.0,
+            registry_admin(&token, Method::PUT, &probe, Some(body))
+                .await
+                .0,
             status,
             "{why}"
         );
     }
     assert_eq!(
-        admin(&token, Method::PUT, "/admin/installations/plant-a", Some(json!({ "kind": "inspection", "tenant": "customer1", "apiUrl": "http://api-inspection:8081" })))
+        registry_admin(&token, Method::PUT, "/admin/installations/plant-a", Some(json!({ "kind": "inspection", "tenant": "customer1", "apiUrl": "http://api-inspection:8081" })))
             .await
             .0,
         StatusCode::CONFLICT,
@@ -247,7 +249,9 @@ async fn given_admin_requests_without_a_valid_token_or_breaking_the_rules_then_t
 
     // Keys: well formed, never a kind's edge key, never for a web-app installation.
     assert_eq!(
-        admin(&token, Method::PUT, &probe, Some(body)).await.0,
+        registry_admin(&token, Method::PUT, &probe, Some(body))
+            .await
+            .0,
         StatusCode::OK
     );
     let keys = format!("{probe}/keys");
@@ -261,7 +265,7 @@ async fn given_admin_requests_without_a_valid_token_or_breaking_the_rules_then_t
         (edge_key, StatusCode::CONFLICT, "a kind's edge key"),
     ] {
         assert_eq!(
-            admin(
+            registry_admin(
                 &token,
                 Method::POST,
                 &keys,
@@ -275,7 +279,7 @@ async fn given_admin_requests_without_a_valid_token_or_breaking_the_rules_then_t
     }
     let (_, public) = new_key();
     assert_eq!(
-        admin(
+        registry_admin(
             &token,
             Method::POST,
             "/admin/installations/plant-a/keys",
@@ -286,4 +290,115 @@ async fn given_admin_requests_without_a_valid_token_or_breaking_the_rules_then_t
         StatusCode::CONFLICT,
         "a web-app installation has no keys of its own"
     );
+}
+
+/// The id of installation `alias`'s organization, once the organization sync has created it.
+async fn organization_id(alias: &str) -> String {
+    for _ in 0..40 {
+        let found: Value = admin(
+            Method::GET,
+            &format!("/organizations?search={alias}&exact=true"),
+            None,
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        let id = found
+            .as_array()
+            .and_then(|orgs| orgs.iter().find(|org| org["alias"] == alias))
+            .and_then(|org| org["id"].as_str());
+        if let Some(id) = id {
+            return id.to_owned();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    panic!("the organization sync created no organization for {alias}");
+}
+
+/// Makes `username` a member of organization `org`, as the installation's administrators would.
+async fn add_member(org: &str, username: &str) {
+    let added = admin(
+        Method::POST,
+        &format!("/organizations/{org}/members"),
+        Some(json!(user_id(username).await)),
+    )
+    .await;
+    assert!(added.status().is_success(), "{}", added.status());
+}
+
+/// A new native installation of the planner kind, without keys; its id and admin path.
+async fn provisioned_native(token: &str) -> (String, String) {
+    let id = unique_label("site");
+    let path = format!("/admin/installations/{id}");
+    let body =
+        json!({ "kind": "planner", "tenant": "customer-n", "apiUrl": "http://localhost:8185" });
+    assert_eq!(
+        registry_admin(token, Method::PUT, &path, Some(body))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    (id, path)
+}
+
+#[tokio::test]
+async fn given_a_provisioned_installation_then_its_organization_appears_and_an_installation_admin_enrolls_a_machine_by_signing_in()
+ {
+    wait_for_stack().await;
+    let token = provisioner_token().await;
+    let (id, path) = provisioned_native(&token).await;
+    let org = organization_id(&id).await;
+    assert_eq!(
+        organization(&id).await["attributes"]["tenant"],
+        json!(["customer-n"])
+    );
+    add_member(&org, "test-installation-admin").await;
+
+    // A new machine with no key: the app makes one, the admin signs in on it, and the hub
+    // enrolls the key and hands the app a session it redeems with that key.
+    let (key, _) = new_key();
+    let machine = installation_with(&id, &key);
+    let enrollment = machine.begin_enrollment("/callback").await.unwrap();
+    let url = enrollment.url().clone();
+    let (session, _) = tokio::join!(
+        machine.finish_enrollment(enrollment, std::time::Duration::from_secs(30)),
+        sign_in_in_system_browser(&url, "test-installation-admin")
+    );
+    let session = session.expect("the machine is enrolled and signed in");
+    assert_eq!(machine.whoami(&session).await.unwrap()["site"], id.as_str());
+
+    let (_, stored) = registry_admin(&token, Method::GET, &path, None).await;
+    let keys = stored["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["keyId"], machine.key_id());
+    assert!(
+        keys[0]["enrolledBy"]
+            .as_str()
+            .is_some_and(|by| by.starts_with("user:")),
+        "who approved it is recorded: {}",
+        keys[0]["enrolledBy"]
+    );
+}
+
+#[tokio::test]
+async fn given_a_member_who_is_not_an_installation_admin_then_the_machine_is_not_enrolled() {
+    wait_for_stack().await;
+    let token = provisioner_token().await;
+    let (id, path) = provisioned_native(&token).await;
+    let org = organization_id(&id).await;
+    let user = fresh_user();
+    add_member(&org, &user).await;
+
+    let (key, _) = new_key();
+    let machine = installation_with(&id, &key);
+    let enrollment = machine.begin_enrollment("/callback").await.unwrap();
+    let at_hub = sign_in_in_system_browser(enrollment.url(), &user).await;
+    assert_eq!(
+        at_hub.status(),
+        StatusCode::FORBIDDEN,
+        "no code goes back to the machine"
+    );
+    let (_, stored) = registry_admin(&token, Method::GET, &path, None).await;
+    assert!(stored["keys"].as_array().unwrap().is_empty());
 }

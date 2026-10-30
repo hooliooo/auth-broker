@@ -15,8 +15,8 @@ pub fn routes() -> Router<AppState> {
 /// Ready only while the hub answers and the registry lists at least one enabled site of this
 /// kind: without either, nobody can sign in or call an API.
 async fn ready(State(app): State<AppState>) -> StatusCode {
-    if app.sites.count() == 0 {
-        warn!("no enabled site of this kind in the registry");
+    if !app.sites.ready() {
+        warn!("no enabled site of this kind in the registry, or the hub has not answered yet");
         return StatusCode::SERVICE_UNAVAILABLE;
     }
     let url = format!("{}/health", app.hub.base());

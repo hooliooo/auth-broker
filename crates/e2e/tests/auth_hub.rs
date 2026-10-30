@@ -534,7 +534,7 @@ async fn given_sign_out_at_one_site_then_every_site_and_kind_in_the_browser_is_s
 }
 
 #[tokio::test]
-async fn given_the_registry_then_the_organization_sync_creates_sites_and_reports_drift() {
+async fn given_the_registry_store_then_the_organization_sync_creates_sites_and_reports_drift() {
     wait_for_stack().await;
     let plant_d = organization("plant-d").await;
     assert_eq!(plant_d["alias"], "plant-d");
@@ -557,10 +557,7 @@ async fn given_the_registry_then_the_organization_sync_creates_sites_and_reports
         .to_owned();
     admin(Method::DELETE, &format!("/organizations/{gone}"), None).await;
     assert!(succeeded, "{stdout}");
-    assert!(
-        stdout.contains("organization plant-d up to date"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("organizations: full pass done"), "{stdout}");
     assert!(
         stdout.contains("DRIFT: organization plant-gone"),
         "{stdout}"
