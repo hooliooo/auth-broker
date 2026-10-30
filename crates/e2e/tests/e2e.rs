@@ -875,12 +875,12 @@ async fn given_a_flood_of_sign_in_starts_when_they_exceed_the_sites_limit_then_t
 }
 
 #[tokio::test]
-async fn given_registry_changes_when_files_change_then_the_hub_reloads_valid_ones_and_ignores_broken_ones()
+async fn given_registry_changes_then_the_hub_follows_valid_kinds_and_installations_and_ignores_broken_ones()
  {
     wait_for_stack().await;
     let before = hub_registry().await["version"].clone();
 
-    // A broken file is refused as a whole: the hub keeps serving the previous registry.
+    // A broken kind document is refused as a whole: the hub keeps serving the previous registry.
     {
         let _broken = TempRegistryFile::write("zz-broken.json", "{ this is not json");
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -896,7 +896,7 @@ async fn given_registry_changes_when_files_change_then_the_hub_reloads_valid_one
         );
     }
 
-    // A new app kind with a site appears without a restart...
+    // A new app kind appears from its document without a restart...
     let key = common::signing::EdgeSigner::from_base64(
         "reload-probe",
         &common::signing::generate_key().unwrap(),
@@ -907,36 +907,61 @@ async fn given_registry_changes_when_files_change_then_the_hub_reloads_valid_one
         "app": {
             "id": "reload-probe", "client_id": "hub-reload-probe", "edge_public_key": key,
             "api_upstream": "http://api-inspection:8081", "api_audience": "reload-probe-api"
-        },
-        "sites": [{ "id": "reload-probe-plant", "origin": "http://reload-probe.localhost:5298",
-                    "tenant": "probe" }]
+        }
     });
     let file = TempRegistryFile::write("zz-reload-probe.json", &probe.to_string());
-    assert!(
-        eventually(20, || async {
-            hub_login_status("reload-probe-plant").await == StatusCode::SEE_OTHER
-        })
-        .await,
-        "new site served after reload"
-    );
-    let registry = hub_registry().await;
-    assert_ne!(registry["version"], before);
-    assert!(
-        registry["apps"]
+    let has_probe = || async {
+        hub_registry().await["apps"]
             .as_array()
             .unwrap()
             .iter()
             .any(|a| a["id"] == "reload-probe")
+    };
+    assert!(
+        eventually(20, has_probe).await,
+        "new kind served after reload"
     );
 
-    // ...and disappears again when its file is removed.
-    drop(file);
+    // ...its installation from the store, once provisioning writes it...
+    let token = provisioner_token().await;
+    let site = unique_label("reload-probe");
+    let created = admin_request(Method::PUT, &format!("/admin/installations/{site}"), &token)
+        .json(&serde_json::json!({
+            "kind": "reload-probe", "origin": "http://reload-probe.localhost:5298", "tenant": "probe"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
     assert!(
         eventually(20, || async {
-            hub_login_status("reload-probe-plant").await == StatusCode::BAD_REQUEST
+            hub_login_status(&site).await == StatusCode::SEE_OTHER
         })
         .await,
-        "removed site refused after reload"
+        "new installation served"
+    );
+
+    // ...gone once removed from the store, and the kind with its document.
+    let removed = admin_request(
+        Method::DELETE,
+        &format!("/admin/installations/{site}"),
+        &token,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(removed.status(), StatusCode::OK);
+    assert!(
+        eventually(20, || async {
+            hub_login_status(&site).await == StatusCode::BAD_REQUEST
+        })
+        .await,
+        "removed installation refused"
+    );
+    drop(file);
+    assert!(
+        eventually(20, || async { !has_probe().await }).await,
+        "removed kind dropped after reload"
     );
 }
 

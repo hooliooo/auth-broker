@@ -24,6 +24,7 @@ an edge per kind; see the RFC "One edge per app kind". What changed:
 | `crates/oidc`                                          | standard OpenID Connect: discovery, token verification, back-channel logout tokens                                                                                                                                                                                                                                       |
 | `crates/keycloak`                                      | Keycloak as an identity provider (see [Identity providers](#identity-providers))                                                                                                                                                                                                                                         |
 | `crates/native-app`                                    | the desktop side of a native installation: sign-in through the system browser with a loopback redirect, and requests signed with the installation's key (a library, and a command-line stand-in for a desktop app)                                                                                                       |
+| `crates/registry-store`                                | installations and their keys in Postgres, for installations created by provisioning automation and keys enrolled by the installations themselves: the schema, writes stamped with a commit-ordered version, and the change feed the hub follows                                                                          |
 | `crates/test-api`, `crates/test-helpers`, `crates/e2e` | a stand-in API, a Keycloak fault proxy and logout-token recorder, and the end-to-end tests                                                                                                                                                                                                                               |
 | `providers/keycloak`                                   | the Keycloak image with the membership extension (`extension/`), its admin-tools image (`config/`), and the realm and organization scripts (`setup/`)                                                                                                                                                                    |
 | `dev/`                                                 | local key generation, the registry templates, and the local cluster's scripts (`dev/k8s/`)                                                                                                                                                                                                                               |
@@ -171,26 +172,71 @@ cargo run -p native-app -- call http://localhost:8185/reports
 cargo run -p native-app -- sign-out
 ```
 
+## Installations in a store
+
+When installations are created by provisioning automation and desktop installations enroll
+their own workstation keys, installations and keys live in Postgres (`crates/registry-store`)
+instead of the registry files; the files keep the app kinds, which stay few and reviewed. Set
+`REGISTRY_DATABASE_URL` on the hub; give the hub and the edges a registry directory whose kind
+documents list no sites.
+
+- **The hub serves from memory and follows the store.** It loads every installation at start,
+  then every `REGISTRY_SYNC_MILLIS` applies only what changed. If the store is down, it keeps
+  serving what it has; no request waits on Postgres.
+- **Edges never reach the store.** With `REGISTRY_FROM_HUB=true`, an edge fetches its kind's
+  web-app installations from the hub's `GET /broker/registry?since=<version>`, signed with the
+  kind's key, then only the changes.
+- **The rules are constraints.** Ids, origins, each kind's hosts and every key are unique on every
+  write; a removed installation's id and a revoked key never come back.
+- **Changes are ordered.** Every write takes the next version from one row and stamps its rows
+  with it, so a follower that has seen version N has seen everything before it.
+
+The admin API (`ADMIN_ADDR`, for provisioning; a bearer token from the identity provider with
+`ADMIN_AUDIENCE` and `ADMIN_ROLE`):
+
+| Request                                         | Does                                                                                        |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `PUT /admin/installations/{id}`                 | creates or changes an installation: `kind`, `tenant`, `origin` or none, `apiUrl`, `enabled` |
+| `GET /admin/installations/{id}`                 | the installation as stored, with every key it ever had                                      |
+| `DELETE /admin/installations/{id}`              | removes it for good                                                                         |
+| `POST /admin/installations/{id}/keys`           | adds a key (`publicKey`) to a native installation                                           |
+| `DELETE /admin/installations/{id}/keys/{keyId}` | revokes a key                                                                               |
+
+A native installation also manages its own keys, in requests signed with a key it holds:
+`POST /broker/keys` enrolls another (a new workstation; `native-app enroll <key file>`) and
+`DELETE /broker/keys/{keyId}` revokes one (`native-app revoke-key <key id>`). The store checks the
+signing key is still in use, so a revoked key never changes keys; for sign-ins and tokens, a
+revocation takes effect once each hub has followed it, within `REGISTRY_SYNC_MILLIS`.
+
+Seed a store from registry files with `hub import-registry <dir>`. The local cluster runs this
+way: its store is seeded from `dev/registry`, and the tests provision through
+`https://registry.broker.localhost` with Keycloak's `registry-provisioner` client. Measure the
+store at a million installations with the `store_scale` example in `crates/registry-store`.
+
 ## Hub settings
 
-| Variable                                     | Default         | Meaning                                                                                                             |
-| -------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `IDENTITY_PROVIDER`                          | `oidc`          | `oidc` or `keycloak`; see [Identity providers](#identity-providers)                                                 |
-| `ISSUER_URI`                                 |                 | the realm as tokens name it                                                                                         |
-| `DISCOVERY_URI`                              | `ISSUER_URI`    | where the hub reaches the provider itself, if not at the issuer; only the docker compose measurement stack needs it |
-| `HUB_PUBLIC_URL`                             |                 | the browser-facing address; the one callback derives from it                                                        |
-| `CLIENT_CREDENTIALS`                         | `client_secret` | `private_key_jwt` (preferred) or `client_secret`                                                                    |
-| `CLIENT_KEY_FILE`, `CLIENT_KEY_ID`           |                 | the hub's EC P-256 key (PEM) and its `kid` (default: thumbprint)                                                    |
-| `CLIENT_NEXT_KEY_FILE`, `CLIENT_NEXT_KEY_ID` |                 | a key published ahead of a rotation                                                                                 |
-| `REDIS_URI`                                  |                 | sessions, sign-ins, handoffs, nonces, rate counters                                                                 |
-| `REGISTRY_DIR`, `REGISTRY_RELOAD_SECS`       | `10`            | the team files                                                                                                      |
-| `LOGIN_PER_MINUTE_PER_IP`                    | `30`            | sign-in starts per client IP                                                                                        |
-| `CLIENT_IP_HEADER`, `TRUSTED_PROXIES`        |                 | a reverse proxy's client IP header, believed only from these ranges                                                 |
-| `MAX_CLOCK_SKEW_SECS`                        | `30`            | how far an edge's clock may drift                                                                                   |
-| `SERVED_ACCESS`                              | `web,native`    | the installation access types this deployment serves; installations of another type are refused as unknown          |
-| `LISTEN_ADDR`                                | `0.0.0.0:8090`  | public address                                                                                                      |
-| `METRICS_ADDR`                               | `0.0.0.0:9100`  | Prometheus metrics, apart from the public port (feature `metrics`)                                                  |
-| `ALLOW_INSECURE_HTTP`                        | `false`         | `true` accepts `http://` URLs; local stacks only                                                                    |
+| Variable                                     | Default          | Meaning                                                                                                                          |
+| -------------------------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `IDENTITY_PROVIDER`                          | `oidc`           | `oidc` or `keycloak`; see [Identity providers](#identity-providers)                                                              |
+| `ISSUER_URI`                                 |                  | the realm as tokens name it                                                                                                      |
+| `DISCOVERY_URI`                              | `ISSUER_URI`     | where the hub reaches the provider itself, if not at the issuer; only the docker compose measurement stack needs it              |
+| `HUB_PUBLIC_URL`                             |                  | the browser-facing address; the one callback derives from it                                                                     |
+| `CLIENT_CREDENTIALS`                         | `client_secret`  | `private_key_jwt` (preferred) or `client_secret`                                                                                 |
+| `CLIENT_KEY_FILE`, `CLIENT_KEY_ID`           |                  | the hub's EC P-256 key (PEM) and its `kid` (default: thumbprint)                                                                 |
+| `CLIENT_NEXT_KEY_FILE`, `CLIENT_NEXT_KEY_ID` |                  | a key published ahead of a rotation                                                                                              |
+| `REDIS_URI`                                  |                  | sessions, sign-ins, handoffs, nonces, rate counters                                                                              |
+| `REGISTRY_DIR`, `REGISTRY_RELOAD_SECS`       | `10`             | the team files                                                                                                                   |
+| `LOGIN_PER_MINUTE_PER_IP`                    | `30`             | sign-in starts per client IP                                                                                                     |
+| `CLIENT_IP_HEADER`, `TRUSTED_PROXIES`        |                  | a reverse proxy's client IP header, believed only from these ranges                                                              |
+| `MAX_CLOCK_SKEW_SECS`                        | `30`             | how far an edge's clock may drift                                                                                                |
+| `SERVED_ACCESS`                              | `web,native`     | the installation access types this deployment serves; installations of another type are refused as unknown                       |
+| `REGISTRY_DATABASE_URL`                      |                  | the registry store (Postgres); the files then hold the app kinds only. See [Installations in a store](#installations-in-a-store) |
+| `REGISTRY_SYNC_MILLIS`                       | `1000`           | how often the hub follows the store's changes                                                                                    |
+| `ADMIN_ADDR`                                 |                  | the registry admin API's address, apart from the public port; only with a store                                                  |
+| `ADMIN_AUDIENCE`, `ADMIN_ROLE`               | `registry-admin` | the audience and realm role a provisioning client's access token must carry                                                      |
+| `LISTEN_ADDR`                                | `0.0.0.0:8090`   | public address                                                                                                                   |
+| `METRICS_ADDR`                               | `0.0.0.0:9100`   | Prometheus metrics, apart from the public port (feature `metrics`)                                                               |
+| `ALLOW_INSECURE_HTTP`                        | `false`          | `true` accepts `http://` URLs; local stacks only                                                                                 |
 
 The hub publishes its public client key at `/.well-known/jwks.json`; every kind's provider
 client reads it from there. Rotation: set `CLIENT_NEXT_KEY_FILE` and restart (both keys
@@ -329,17 +375,19 @@ right after the hub has reloaded: requests signed with the old key are refused f
 
 ### Edge settings
 
-| Variable                               | Default        | Meaning                                                             |
-| -------------------------------------- | -------------- | ------------------------------------------------------------------- |
-| `APP_ID`                               |                | the app kind whose sites this edge serves                           |
-| `EDGE_KEY_FILE` or `EDGE_KEY`          |                | the kind's Ed25519 private key (base64url PKCS#8)                   |
-| `REGISTRY_DIR`, `REGISTRY_RELOAD_SECS` | `10`           | the registry files, the same the hub reads                          |
-| `HUB_URL`, `HUB_INTERNAL_URL`          | `HUB_URL`      | the hub as browsers reach it, and as the edge does                  |
-| `API_READ_TIMEOUT_SECS`                | `60`           | direct kinds: longest silence from a site's API                     |
-| `CLIENT_IP_HEADER`, `TRUSTED_PROXIES`  |                | a load balancer's client IP header, believed only from these ranges |
-| `LISTEN_ADDR`                          | `0.0.0.0:5200` | address and port                                                    |
-| `METRICS_ADDR`                         | `0.0.0.0:9100` | Prometheus metrics, apart from the public port (feature `metrics`)  |
-| `ALLOW_INSECURE_HTTP`                  | `false`        | `true` accepts `http://` URLs; local stacks only                    |
+| Variable                               | Default        | Meaning                                                                                 |
+| -------------------------------------- | -------------- | --------------------------------------------------------------------------------------- |
+| `APP_ID`                               |                | the app kind whose sites this edge serves                                               |
+| `EDGE_KEY_FILE` or `EDGE_KEY`          |                | the kind's Ed25519 private key (base64url PKCS#8)                                       |
+| `REGISTRY_DIR`, `REGISTRY_RELOAD_SECS` | `10`           | the registry files, the same the hub reads                                              |
+| `REGISTRY_FROM_HUB`                    | `false`        | `true`: the kind's installations come from the hub (its store); the files hold the kind |
+| `REGISTRY_SYNC_MILLIS`                 | `1000`         | how often to ask the hub for changes, with `REGISTRY_FROM_HUB`                          |
+| `HUB_URL`, `HUB_INTERNAL_URL`          | `HUB_URL`      | the hub as browsers reach it, and as the edge does                                      |
+| `API_READ_TIMEOUT_SECS`                | `60`           | direct kinds: longest silence from a site's API                                         |
+| `CLIENT_IP_HEADER`, `TRUSTED_PROXIES`  |                | a load balancer's client IP header, believed only from these ranges                     |
+| `LISTEN_ADDR`                          | `0.0.0.0:5200` | address and port                                                                        |
+| `METRICS_ADDR`                         | `0.0.0.0:9100` | Prometheus metrics, apart from the public port (feature `metrics`)                      |
+| `ALLOW_INSECURE_HTTP`                  | `false`        | `true` accepts `http://` URLs; local stacks only                                        |
 
 ## Measuring capacity
 
@@ -402,8 +450,10 @@ machine by themselves (Safari does not), so no hosts-file entries are needed:
   `https://hub.broker.localhost` through the ingress too (CoreDNS rewrites the names), so the
   issuer and the hub's address are the same for browsers and services. The edges need no
   `HUB_INTERNAL_URL`.
-- **The registry is live**: the nodes see this checkout's `dev/registry` at `/registry`, so a
-  changed file reaches the hub and the edges within seconds. The cluster is tied to this
+- **The registry**: the hub and the edges read the app kinds from this checkout's
+  `dev/registry/kinds` (the nodes see `dev/registry` at `/registry`), and the installations from
+  the registry store, a PostgreSQL seeded from `dev/registry` on every `up.sh`. A changed kind
+  file reaches them within seconds, a store change within a second. The cluster is tied to this
   checkout's path; recreate it after moving the checkout.
 - **Test helpers**: a proxy in front of Keycloak that tests can make fail, answering at
   Keycloak's own address for the hub only, and a recorder of back-channel logout tokens. The

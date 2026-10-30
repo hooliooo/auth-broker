@@ -41,7 +41,10 @@ spec:
             - { name: APP_ID, value: inspection }
             - { name: HUB_URL, value: "https://hub.broker.localhost" }
             - { name: EDGE_KEY_FILE, value: /etc/edge/key/edge.key }
-            - { name: REGISTRY_DIR, value: /etc/edge/registry }
+            # The kind from the files; its web-app installations from the hub.
+            - { name: REGISTRY_DIR, value: /etc/edge/registry/kinds }
+            - { name: REGISTRY_FROM_HUB, value: "true" }
+            - { name: REGISTRY_SYNC_MILLIS, value: "500" }
             - { name: REGISTRY_RELOAD_SECS, value: "2" }
             # The tests send each simulated browser's address in this header, as Cloudflare
             # would; the ingress passes it through, and only its pods are believed.
@@ -132,7 +135,10 @@ spec:
             - { name: APP_ID, value: billing }
             - { name: HUB_URL, value: "https://hub.broker.localhost" }
             - { name: EDGE_KEY_FILE, value: /etc/edge/key/edge.key }
-            - { name: REGISTRY_DIR, value: /etc/edge/registry }
+            # The kind from the files; its web-app installations from the hub.
+            - { name: REGISTRY_DIR, value: /etc/edge/registry/kinds }
+            - { name: REGISTRY_FROM_HUB, value: "true" }
+            - { name: REGISTRY_SYNC_MILLIS, value: "500" }
             - { name: REGISTRY_RELOAD_SECS, value: "2" }
             # The tests send each simulated browser's address in this header, as Cloudflare
             # would; the ingress passes it through, and only its pods are believed.
@@ -223,7 +229,10 @@ spec:
             - { name: APP_ID, value: maintenance }
             - { name: HUB_URL, value: "https://hub.broker.localhost" }
             - { name: EDGE_KEY_FILE, value: /etc/edge/key/edge.key }
-            - { name: REGISTRY_DIR, value: /etc/edge/registry }
+            # The kind from the files; its web-app installations from the hub.
+            - { name: REGISTRY_DIR, value: /etc/edge/registry/kinds }
+            - { name: REGISTRY_FROM_HUB, value: "true" }
+            - { name: REGISTRY_SYNC_MILLIS, value: "500" }
             - { name: REGISTRY_RELOAD_SECS, value: "2" }
             # The tests send each simulated browser's address in this header, as Cloudflare
             # would; the ingress passes it through, and only its pods are believed.

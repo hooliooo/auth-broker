@@ -2,13 +2,14 @@
 # database, Redis, the hub, the three kinds' edges, their stand-in APIs, the test helpers, and
 # the ports the e2e tests use. Secrets, the local CA's ConfigMap and the setup scripts' ConfigMap
 # are created by dev/k8s/up.sh, never committed; the realm setup Job (keycloak-setup-job.yaml)
-# is applied by up.sh on every pass.
+# and the registry seed Job (registry-seed-job.yaml) are applied by up.sh on every pass.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: auth-broker
 resources:
   - namespace.yaml
   - keycloak-postgres.yaml
+  - registry-postgres.yaml
   - keycloak.yaml
   - organization-sync.yaml
   - redis.yaml

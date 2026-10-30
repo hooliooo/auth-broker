@@ -117,6 +117,18 @@ pub struct HubConfig {
     pub listen: SocketAddr,
     /// Where Prometheus metrics are served, apart from the public port.
     pub metrics_addr: SocketAddr,
+    /// `REGISTRY_DATABASE_URL`: where installations and their keys are kept, if not in the
+    /// registry files; the files then hold the app kinds only.
+    pub registry_database_url: Option<String>,
+    /// `REGISTRY_SYNC_MILLIS`: how often the hub follows the store's changes.
+    pub sync_interval: Duration,
+    /// `ADMIN_ADDR`: where the registry admin API listens, apart from the public port; only with
+    /// a store. Off if unset.
+    pub admin_addr: Option<SocketAddr>,
+    /// `ADMIN_AUDIENCE`: the audience provisioning clients' access tokens must carry.
+    pub admin_audience: String,
+    /// `ADMIN_ROLE`: the realm role provisioning clients' access tokens must carry.
+    pub admin_role: String,
     /// `SERVED_ACCESS`: the access types this deployment serves, `web` and `native` by default;
     /// a deployment for one type only refuses installations of the other as unknown.
     pub served_access: ServedAccess,
@@ -208,6 +220,15 @@ impl HubConfig {
                 "METRICS_ADDR",
                 "0.0.0.0:9100".parse().expect("valid address"),
             )?,
+            registry_database_url: std::env::var("REGISTRY_DATABASE_URL").ok(),
+            sync_interval: Duration::from_millis(number("REGISTRY_SYNC_MILLIS", 1_000)?),
+            admin_addr: std::env::var("ADMIN_ADDR")
+                .ok()
+                .map(|addr| addr.parse().map_err(|_| ConfigError::Invalid("ADMIN_ADDR")))
+                .transpose()?,
+            admin_audience: std::env::var("ADMIN_AUDIENCE")
+                .unwrap_or_else(|_| "registry-admin".into()),
+            admin_role: std::env::var("ADMIN_ROLE").unwrap_or_else(|_| "registry-admin".into()),
             served_access: ServedAccess::parse(
                 &std::env::var("SERVED_ACCESS").unwrap_or_else(|_| "web,native".into()),
             )

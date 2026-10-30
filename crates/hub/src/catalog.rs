@@ -4,22 +4,28 @@
 //! seconds. A valid change is swapped in atomically; an invalid one is logged and ignored, so a
 //! team's typo never takes the hub down. Clients are built from discovery in the background too,
 //! so a provider hiccup delays readiness instead of stopping startup.
+//!
+//! With a store, the files hold the app kinds only, and installations come from the store: loaded
+//! whole at start, then followed change by change, each change applied on top of the indexed
+//! registry. The registry is compacted once enough changes accumulate. If the store cannot be
+//! reached, the hub keeps serving the version it has.
 
 use std::{
     collections::HashMap,
     sync::{Arc, PoisonError, RwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use common::{
     client::credentials::Credentials,
-    registry::{App, Registry},
+    registry::{App, Registry, RegistryError},
 };
 use oidc::{OidcJwtVerifier, ProviderClaims};
+use registry_store::Store;
 use reqwest::{Client, Url, redirect};
 use serde_json::Value;
 use tokio::sync::Semaphore;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     config::{self, ClientCredentials},
@@ -43,9 +49,33 @@ impl ProviderClaims for RawPayload {
 pub struct Catalog {
     /// Every kind and site.
     pub registry: Registry,
-    /// Changes whenever any registry document changes.
+    /// Changes whenever any registry document or, with a store, the store's version does.
     pub version: String,
+    /// Changes whenever any registry document changes.
+    pub files_version: String,
+    /// With a store, the store version the installations are as of.
+    pub store_version: Option<i64>,
 }
+
+impl Catalog {
+    /// `registry`, from documents at `files_version` and, with a store, its `store_version`.
+    fn new(registry: Registry, files_version: String, store_version: Option<i64>) -> Self {
+        let version = match store_version {
+            Some(store_version) => format!("{files_version}.{store_version}"),
+            None => files_version.clone(),
+        };
+        Self {
+            registry,
+            version,
+            files_version,
+            store_version,
+        }
+    }
+}
+
+/// How many changed installations the registry carries on top of its snapshot before it is
+/// compacted into a new one.
+const COMPACT_AT: usize = 20_000;
 
 /// Everything the hub needs to act for one app kind.
 pub struct AppClient {
@@ -145,16 +175,116 @@ pub fn load(dir: &str) -> Result<Catalog, Box<dyn std::error::Error>> {
     let (documents, version) = config::read_documents(dir)?;
     let registry =
         Registry::from_documents(documents.iter().map(|(n, t)| (n.as_str(), t.as_str())))?;
-    Ok(Catalog { registry, version })
+    Ok(Catalog::new(registry, version, None))
+}
+
+/// The app kinds in directory `dir` with every installation in `store`. An installation that
+/// fails validation is left out and logged; the kinds must be valid.
+pub async fn load_with_store(
+    dir: &str,
+    store: &Store,
+) -> Result<Catalog, Box<dyn std::error::Error>> {
+    let (documents, files_version) = config::read_documents(dir)?;
+    let kinds =
+        Registry::kinds_from_documents(documents.iter().map(|(n, t)| (n.as_str(), t.as_str())))?;
+    let (store_version, records) = store.load_all().await?;
+    let (registry, rejected) = kinds.with_installations(records);
+    log_rejected(&rejected);
+    Ok(Catalog::new(registry, files_version, Some(store_version)))
+}
+
+/// Logs each installation the store holds that the registry refused, and why.
+fn log_rejected(rejected: &[(String, RegistryError)]) {
+    for (site, error) in rejected {
+        warn!(%site, %error, "installation in the store refused; left out");
+    }
 }
 
 /// Keeps `app`'s registry and per-kind clients current. Runs for the life of the process.
 pub async fn maintain(app: AppState) {
+    let Some(store) = app.store.clone() else {
+        loop {
+            reload_registry(&app);
+            sync_clients(&app).await;
+            tokio::time::sleep(app.config.reload_interval).await;
+        }
+    };
+    let mut files_checked: Option<Instant> = None;
     loop {
-        reload_registry(&app);
-        sync_clients(&app).await;
-        tokio::time::sleep(app.config.reload_interval).await;
+        if files_checked.is_none_or(|at| at.elapsed() >= app.config.reload_interval) {
+            reload_kinds(&app, &store).await;
+            sync_clients(&app).await;
+            files_checked = Some(Instant::now());
+        }
+        follow_store(&app, &store).await;
+        tokio::time::sleep(app.config.sync_interval).await;
     }
+}
+
+/// Serves `catalog` from now on.
+fn swap(app: &AppState, catalog: Catalog) {
+    *app.runtime
+        .catalog
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = Arc::new(catalog);
+}
+
+/// With a store: reloads everything if a kind's document changed and is valid.
+async fn reload_kinds(app: &AppState, store: &Store) {
+    let current = app.runtime.catalog();
+    match config::read_documents(&app.config.registry_dir) {
+        Ok((_, version)) if version == current.files_version => {}
+        Ok(_) => match load_with_store(&app.config.registry_dir, store).await {
+            Ok(catalog) => {
+                info!(
+                    version = %catalog.version,
+                    apps = catalog.registry.apps().len(),
+                    sites = catalog.registry.site_count(),
+                    "registry reloaded"
+                );
+                swap(app, catalog);
+            }
+            Err(e) => error!(error = %e, "registry change refused; keeping the previous version"),
+        },
+        Err(e) => error!(error = %e, "registry unreadable; keeping the previous version"),
+    }
+}
+
+/// Applies the store's changes since the version served, compacting the registry once enough
+/// have accumulated. If the store cannot be reached, keeps serving what it has.
+async fn follow_store(app: &AppState, store: &Store) {
+    let current = app.runtime.catalog();
+    let since = current.store_version.unwrap_or_default();
+    let (version, changes) = match store.changes_since(since).await {
+        Ok(found) if found.0 > since => found,
+        Ok(_) => return,
+        Err(e) => {
+            warn!(error = %e, "registry store unreachable; serving the version held");
+            return;
+        }
+    };
+    let changed = changes.len();
+    let (mut registry, rejected) = current.registry.with_changes(changes);
+    log_rejected(&rejected);
+    if registry.pending_changes() >= COMPACT_AT {
+        let started = Instant::now();
+        registry = match tokio::task::spawn_blocking(move || registry.compacted()).await {
+            Ok(compacted) => compacted,
+            Err(e) => {
+                error!(error = %e, "registry compaction failed; the changes are fetched again");
+                return;
+            }
+        };
+        info!(
+            took_ms = started.elapsed().as_millis() as u64,
+            "registry compacted"
+        );
+    }
+    debug!(version, changed, "registry store changes applied");
+    swap(
+        app,
+        Catalog::new(registry, current.files_version.clone(), Some(version)),
+    );
 }
 
 /// Swaps in `app`'s registry directory if it changed and is valid.
@@ -167,13 +297,10 @@ fn reload_registry(app: &AppState) {
                 info!(
                     version = %catalog.version,
                     apps = catalog.registry.apps().len(),
-                    sites = catalog.registry.sites().len(),
+                    sites = catalog.registry.site_count(),
                     "registry reloaded"
                 );
-                *app.runtime
-                    .catalog
-                    .write()
-                    .unwrap_or_else(PoisonError::into_inner) = Arc::new(catalog);
+                swap(app, catalog);
             }
             Err(e) => error!(error = %e, "registry change refused; keeping the previous version"),
         },

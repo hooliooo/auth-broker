@@ -40,7 +40,6 @@ async fn registry(State(state): State<AppState>) -> Json<Value> {
             let sites: Vec<&str> = catalog
                 .registry
                 .sites()
-                .iter()
                 .filter(|s| s.app_id == app.id)
                 .map(|s| s.id.as_str())
                 .collect();

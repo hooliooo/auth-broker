@@ -57,6 +57,12 @@ pub struct EdgeConfig {
     pub registry_dir: String,
     /// `REGISTRY_RELOAD_SECS`: how often the registry is re-read (default 10).
     pub reload_interval: Duration,
+    /// `REGISTRY_FROM_HUB=true`: the registry files hold the app kinds only, and the kind's
+    /// installations come from the hub, which keeps them in its store.
+    pub registry_from_hub: bool,
+    /// `REGISTRY_SYNC_MILLIS`: how often the edge asks the hub for changes, with
+    /// `REGISTRY_FROM_HUB`.
+    pub sync_interval: Duration,
     /// The hub as browsers reach it (sign-in redirects).
     pub hub_url: Url,
     /// The hub as this edge reaches it (signed requests); differs inside Docker.
@@ -118,6 +124,15 @@ impl EdgeConfig {
                     .ok()
                     .filter(|secs| *secs > 0)
                     .ok_or(ConfigError::Invalid("REGISTRY_RELOAD_SECS"))?,
+            ),
+            registry_from_hub: std::env::var("REGISTRY_FROM_HUB")
+                .is_ok_and(|value| value == "true"),
+            sync_interval: Duration::from_millis(
+                std::env::var("REGISTRY_SYNC_MILLIS")
+                    .map_or(Ok(1_000), |value| value.parse())
+                    .ok()
+                    .filter(|millis| *millis > 0)
+                    .ok_or(ConfigError::Invalid("REGISTRY_SYNC_MILLIS"))?,
             ),
             hub_internal_url: hub_internal_url.as_str().trim_end_matches('/').to_owned(),
             hub_url,

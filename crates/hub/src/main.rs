@@ -18,6 +18,7 @@ use axum::{
     routing::get,
 };
 use common::{metrics::Description, request_id, shutdown};
+use registry_store::{InstallationWrite, Store};
 use reqwest::{Client, redirect};
 use tokio::net::TcpListener;
 use tracing::info;
@@ -29,6 +30,7 @@ use crate::{
     state::AppState,
 };
 
+mod admin;
 mod broker;
 mod catalog;
 mod config;
@@ -95,9 +97,14 @@ async fn main() -> ExitCode {
 }
 
 /// Reads the settings and registry, connects to Redis, and serves until shut down; or runs
-/// `validate-registry`.
+/// `validate-registry <dir>` or `import-registry <dir>`.
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [command, dir] = args.as_slice()
+        && command == "import-registry"
+    {
+        return import_registry(dir).await;
+    }
     if let [command, dir] = args.as_slice()
         && command == "validate-registry"
     {
@@ -106,7 +113,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "registry {} is valid: {} app kinds, {} sites",
             catalog.version,
             catalog.registry.apps().len(),
-            catalog.registry.sites().len()
+            catalog.registry.site_count()
         );
         return Ok(());
     }
@@ -120,12 +127,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     common::random::random_token()?;
 
     let config = HubConfig::from_env()?;
+    // With a store, the files hold the app kinds and the store the installations.
+    let store = match &config.registry_database_url {
+        Some(url) => {
+            let store = Store::connect(url).await?;
+            store.migrate().await?;
+            Some(store)
+        }
+        None => None,
+    };
     // The first registry must be valid; later changes that are invalid are ignored and logged.
-    let initial = catalog::load(&config.registry_dir)?;
+    let initial = match &store {
+        Some(store) => catalog::load_with_store(&config.registry_dir, store).await?,
+        None => catalog::load(&config.registry_dir)?,
+    };
     info!(
         version = %initial.version,
         apps = initial.registry.apps().len(),
-        sites = initial.registry.sites().len(),
+        sites = initial.registry.site_count(),
         "registry loaded"
     );
 
@@ -136,13 +155,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let redis = redis::Client::open(config.redis_uri.as_str())?
         .get_connection_manager()
         .await?;
-    let (listen, metrics_addr) = (config.listen, config.metrics_addr);
+    let (listen, metrics_addr, admin_addr) =
+        (config.listen, config.metrics_addr, config.admin_addr);
 
     let state = AppState {
         idp,
         redis,
         runtime: Arc::new(Runtime::new(initial)),
         config: Arc::new(config),
+        store,
+        admin_verifier: Arc::default(),
     };
     // Builds every kind's provider client in the background and keeps the registry current;
     // the hub reports not-ready until all clients exist, instead of failing to start.
@@ -159,12 +181,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Outermost, so every response carries an id; an edge's id is kept.
     let app = app
         .layer(middleware::from_fn(request_id::assign))
-        .with_state(state);
+        .with_state(state.clone());
 
     #[cfg(feature = "metrics")]
     tokio::spawn(common::metrics::serve(metrics_addr, "hub", COUNTERS));
     #[cfg(not(feature = "metrics"))]
     let _ = (metrics_addr, COUNTERS);
+
+    // The registry admin API, on its own address and only with a store.
+    if let Some(addr) = admin_addr.filter(|_| state.store.is_some()) {
+        let admin = admin::routes()
+            .layer(middleware::from_fn(request_id::assign))
+            .with_state(state.clone());
+        let listener = TcpListener::bind(addr).await?;
+        info!("registry admin API listening on {}", listener.local_addr()?);
+        tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, admin)
+                .with_graceful_shutdown(shutdown::signal())
+                .await
+            {
+                tracing::error!(%error, "registry admin API stopped");
+            }
+        });
+    }
 
     let listener = TcpListener::bind(listen).await?;
     info!("hub listening on {}", listener.local_addr()?);
@@ -175,6 +214,50 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_graceful_shutdown(shutdown::signal())
     .await?;
+    Ok(())
+}
+
+/// Seeds the store at `REGISTRY_DATABASE_URL` with the installations in the registry files in
+/// `dir`, validated as a whole first: creates or updates each, and adds the keys it lacks.
+async fn import_registry(dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let url = std::env::var("REGISTRY_DATABASE_URL")
+        .map_err(|_| "import-registry needs REGISTRY_DATABASE_URL")?;
+    let registry = catalog::load(dir)?.registry;
+    let mut imports = Vec::new();
+    for site in registry.sites() {
+        let app = registry
+            .app(&site.app_id)
+            .ok_or("a site without its kind")?;
+        let (host, bare_host) = common::registry::web_hosts(site)
+            .map_or((None, None), |(host, bare)| (Some(host), bare));
+        let write = InstallationWrite {
+            id: site.id.clone(),
+            kind: site.app_id.clone(),
+            tenant: site.tenant.clone(),
+            enabled: site.enabled,
+            origin: site
+                .origin()
+                .map(|origin| origin.as_str().trim_end_matches('/').to_owned()),
+            host,
+            bare_host,
+            api_url: site.api_url.as_ref().map(|url| url.as_str().to_owned()),
+            login_per_minute: (site.login_per_minute != app.login_per_minute)
+                .then(|| i64::try_from(site.login_per_minute).unwrap_or(i64::MAX)),
+        };
+        let keys = site
+            .keys()
+            .iter()
+            .map(|key| (key.key, key.id.clone()))
+            .collect();
+        imports.push((write, keys));
+    }
+    let store = Store::connect(&url).await?;
+    store.migrate().await?;
+    let version = store.import(&imports).await?;
+    println!(
+        "imported {} installations from {dir} at version {version}",
+        imports.len()
+    );
     Ok(())
 }
 

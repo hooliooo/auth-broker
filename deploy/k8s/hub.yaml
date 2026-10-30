@@ -12,6 +12,8 @@ spec:
   ports:
     - name: http
       port: 8090
+    - name: admin
+      port: 8095
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -39,8 +41,19 @@ spec:
             - { name: ISSUER_URI, value: "https://keycloak.broker.localhost/realms/broker" }
             - { name: HUB_PUBLIC_URL, value: "https://hub.broker.localhost" }
             - { name: REDIS_URI, value: "redis://redis:6379" }
-            - { name: REGISTRY_DIR, value: /etc/hub/registry }
+            # The app kinds from the files (kinds only, written by dev/generate-dev-keys.sh); the
+            # installations and their keys from the registry store.
+            - { name: REGISTRY_DIR, value: /etc/hub/registry/kinds }
             - { name: REGISTRY_RELOAD_SECS, value: "2" }
+            - name: REGISTRY_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: registry-db, key: password }
+            - name: REGISTRY_DATABASE_URL
+              value: "postgres://hub:$(REGISTRY_DB_PASSWORD)@registry-postgres:5432/registry"
+            - { name: REGISTRY_SYNC_MILLIS, value: "500" }
+            # The admin API, for provisioning: its own port, reached at
+            # https://registry.broker.localhost by the tests.
+            - { name: ADMIN_ADDR, value: "0.0.0.0:8095" }
             - { name: CLIENT_CREDENTIALS, value: private_key_jwt }
             - { name: CLIENT_KEY_FILE, value: /run/secrets/hub/hub-client-key.pem }
             # The tests send each simulated browser's address in this header, as Cloudflare
@@ -52,6 +65,8 @@ spec:
           ports:
             - name: http
               containerPort: 8090
+            - name: admin
+              containerPort: 8095
             - name: metrics
               containerPort: 9100
           readinessProbe:
@@ -97,3 +112,27 @@ spec:
               service:
                 name: hub
                 port: { name: http }
+---
+# The registry admin API at https://registry.broker.localhost, for the tests' provisioning
+# client. In production it stays off the public ingress: provisioning runs inside the network.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: registry-admin
+  annotations:
+    cert-manager.io/cluster-issuer: local-ca
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [registry.broker.localhost]
+      secretName: registry-admin-tls
+  rules:
+    - host: registry.broker.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hub
+                port: { name: admin }

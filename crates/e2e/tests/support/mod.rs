@@ -43,9 +43,12 @@ mod stack {
     pub const PLANT_RETIRED: &str = "https://plant-retired.inspection.broker.localhost";
     /// A host the inspection edge receives but no registry entry names.
     pub const PLANT_UNKNOWN: &str = "https://plant-unknown.inspection.broker.localhost";
+    /// The hub's registry admin API, as provisioning automation calls it.
+    pub const REGISTRY_ADMIN: &str = "https://registry.broker.localhost";
     /// The names the tests send to the ingress themselves.
     pub(super) const PUBLIC_NAMES: &[&str] = &[
         "hub.broker.localhost",
+        "registry.broker.localhost",
         "keycloak.broker.localhost",
         "plant-a.inspection.broker.localhost",
         "plant-b.inspection.broker.localhost",
@@ -70,6 +73,8 @@ mod stack {
     pub const PLANT_E: &str = "http://plant-e.localhost:5203";
     pub const PLANT_RETIRED: &str = "http://plant-retired.localhost:5201";
     pub const PLANT_UNKNOWN: &str = "http://plant-unknown.localhost:5201";
+    /// The measurement stack keeps installations in files: no admin API.
+    pub const REGISTRY_ADMIN: &str = "http://localhost:8095";
     /// `*.localhost` always means this machine, whatever the OS resolver thinks.
     pub(super) const PUBLIC_NAMES: &[&str] = &[
         "plant-a.localhost",
@@ -155,6 +160,64 @@ pub fn fresh_member_of_plant_d_only() -> String {
 
 /// Where the public names lead: the cluster's ingress (`E2E_INGRESS_ADDR`, default
 /// `127.0.0.1:443`); for the compose stack, this machine at each URL's own port.
+/// An access token for Keycloak's `registry-provisioner` client, by the client credentials grant,
+/// as provisioning automation gets one.
+pub async fn provisioner_token() -> String {
+    let secret = std::fs::read_to_string(format!(
+        "{}/../../dev/keys/registry-provisioner.secret",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("dev/k8s/up.sh creates the provisioner's secret");
+    let answer: serde_json::Value = client()
+        .post(format!(
+            "{KEYCLOAK}/realms/{REALM}/protocol/openid-connect/token"
+        ))
+        .form(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", "registry-provisioner"),
+            ("client_secret", secret.trim()),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    answer["access_token"]
+        .as_str()
+        .expect("Keycloak issues the provisioner a token")
+        .to_owned()
+}
+
+/// A request to the registry admin API at `path`, with bearer `token`.
+pub fn admin_request(method: Method, path: &str, token: &str) -> RequestBuilder {
+    client()
+        .request(method, format!("{REGISTRY_ADMIN}{path}"))
+        .bearer_auth(token)
+}
+
+/// A client like [`client`] that also reaches `host`, e.g. a web-app installation created during
+/// a test, through the ingress.
+pub fn client_for_host(host: &str) -> Client {
+    Client::builder()
+        .resolve(host, ingress())
+        .redirect(redirect::Policy::none())
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap()
+}
+
+/// A fresh DNS label starting with `prefix`, e.g. for an installation id never used before.
+pub fn unique_label(prefix: &str) -> String {
+    let suffix: String = common::random::random_token()
+        .unwrap()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(10)
+        .collect();
+    format!("{prefix}-{}", suffix.to_ascii_lowercase())
+}
+
 fn ingress() -> SocketAddr {
     if cfg!(feature = "load") {
         return "127.0.0.1:0".parse().unwrap();
@@ -657,13 +720,14 @@ pub async fn hub_login_status(site: &str) -> StatusCode {
     client().get(url).send().await.unwrap().status()
 }
 
-/// A registry document written next to the teams' files for the length of a test.
+/// A kind's registry document written next to the teams' kinds, which the cluster's hub and edges
+/// read, for the length of a test.
 pub struct TempRegistryFile(std::path::PathBuf);
 
 impl TempRegistryFile {
     pub fn write(name: &str, contents: &str) -> Self {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../dev/registry")
+            .join("../../dev/registry/kinds")
             .join(name);
         std::fs::write(&path, contents).unwrap();
         Self(path)

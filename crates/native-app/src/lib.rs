@@ -169,6 +169,36 @@ impl Installation {
         self.signer.public_key()
     }
 
+    /// The id the hub knows this app's key by.
+    pub fn key_id(&self) -> String {
+        self.signer.key_id()
+    }
+
+    /// Enrolls `public_key` (`ed25519:<base64url>`) as another of the installation's keys, e.g.
+    /// for a new workstation, in a request signed with this app's key; returns its key id. For a
+    /// hub that keeps installations in its store; the key works once the hub has followed the
+    /// change, within a second or so.
+    pub async fn enroll(&self, public_key: &str) -> Result<String, Error> {
+        let response = self
+            .signed(Method::POST, "/broker/keys", None)?
+            .json(&json!({ "publicKey": public_key }))
+            .send()
+            .await?;
+        let enrolled: Value = accepted(response)?.json().await?;
+        Ok(enrolled["keyId"].as_str().unwrap_or_default().to_owned())
+    }
+
+    /// Revokes the installation's key `key_id`, e.g. of a retired workstation, or this app's
+    /// own.
+    pub async fn revoke_key(&self, key_id: &str) -> Result<(), Error> {
+        let response = self
+            .signed(Method::DELETE, &format!("/broker/keys/{key_id}"), None)?
+            .send()
+            .await?;
+        accepted(response)?;
+        Ok(())
+    }
+
     /// Starts a sign-in: listens on `127.0.0.1` at a free port for the browser's return to
     /// `redirect_path` (the kind's registered path), and builds the hub URL to open in the
     /// system browser.

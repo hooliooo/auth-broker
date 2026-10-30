@@ -27,7 +27,7 @@ step() { printf '\n==> %s\n' "$*"; }
 
 # ---- Preflight: everything a first run needs, each with what to do about it ----
 problems=()
-for tool in docker kind kubectl helm mkcert openssl; do
+for tool in docker kind kubectl helm mkcert openssl jq; do
   command -v "$tool" >/dev/null || problems+=("$tool is not installed: see README.md, 'Local cluster'")
 done
 if ! command -v docker >/dev/null; then
@@ -130,6 +130,7 @@ secret_once() { # <name> <key=value>...
 random() { openssl rand -base64 24 | tr -d '/+=' | head -c 24; }
 secret_once keycloak-admin username=admin "password=$(random)"
 secret_once keycloak-db "password=$(random)"
+secret_once registry-db "password=$(random)"
 # This machine's keys (dev/keys), replaced whenever they change.
 k -n "$ns" create secret generic hub-client-key \
   --from-file=hub-client-key.pem="$root/dev/keys/hub-client-key.pem" \
@@ -137,6 +138,9 @@ k -n "$ns" create secret generic hub-client-key \
 edge_keys=()
 for key in "$root"/dev/keys/edge-*.key; do edge_keys+=(--from-file="$key"); done
 k -n "$ns" create secret generic edge-keys "${edge_keys[@]}" --dry-run=client -o yaml | k apply -f -
+k -n "$ns" create secret generic registry-provisioner \
+  --from-file=secret="$root/dev/keys/registry-provisioner.secret" \
+  --dry-run=client -o yaml | k apply -f -
 # The local CA's certificate (public only), for pods that call the public names.
 k -n "$ns" create configmap local-ca --from-file=ca.crt="$ca_root/rootCA.pem" \
   --dry-run=client -o yaml | k apply -f -
@@ -158,6 +162,19 @@ if ! k -n "$ns" wait job keycloak-setup --for=condition=Complete --timeout=600s;
   echo "Realm setup failed; see above."
   exit 1
 fi
+
+step "Registry store"
+# Seeds the store from this checkout's registry files; installations added through the admin API
+# since are kept.
+k -n "$ns" rollout status statefulset registry-postgres --timeout=180s
+k -n "$ns" delete job registry-seed --ignore-not-found
+k apply -f "$root/deploy/k8s/registry-seed-job.yaml"
+if ! k -n "$ns" wait job registry-seed --for=condition=Complete --timeout=300s; then
+  k -n "$ns" logs job/registry-seed --all-containers | tail -40
+  echo "Registry seeding failed; see above."
+  exit 1
+fi
+k -n "$ns" logs job/registry-seed
 
 step "Broker"
 # Restarts the deployments named, and returns once only their new pods are left: a rollout
@@ -182,7 +199,7 @@ restart test-helpers
 restart api-inspection api-billing api-plant-d api-plant-e api-planner
 restart hub
 restart edge-inspection edge-billing edge-maintenance
-for certificate in hub-tls edge-inspection-tls edge-billing-tls edge-maintenance-tls; do
+for certificate in hub-tls registry-admin-tls edge-inspection-tls edge-billing-tls edge-maintenance-tls; do
   k -n "$ns" wait certificate "$certificate" --for=condition=Ready --timeout=120s
 done
 
@@ -190,6 +207,7 @@ cat <<DONE
 
 Keycloak:        https://keycloak.broker.localhost        (admin console: /admin, realm broker)
 Hub:             https://hub.broker.localhost
+Registry admin:  https://registry.broker.localhost  (client registry-provisioner, secret in dev/keys)
 Sites:           https://plant-a.inspection.broker.localhost, plant-b.inspection
                  https://plant-c.billing.broker.localhost
                  https://plant-d.maintenance.broker.localhost, plant-e.maintenance

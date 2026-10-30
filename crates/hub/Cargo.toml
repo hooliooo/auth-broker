@@ -23,6 +23,7 @@ base64.workspace             = true
 futures-util                 = "0.3"
 keycloak                     = { path = "../keycloak", optional = true }
 oidc                         = { path = "../oidc" }
+registry-store               = { path = "../registry-store" }
 redis                        = { workspace = true, features = ["tokio-comp", "connection-manager"] }
 reqwest                      = { workspace = true, features = ["stream"] }
 serde.workspace              = true

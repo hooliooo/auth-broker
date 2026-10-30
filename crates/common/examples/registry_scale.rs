@@ -95,7 +95,7 @@ fn main() {
         let keys = half * 2 + 5500;
         println!(
             "\n== {} installations ({} web, {} native), {} keys, registry JSON {}",
-            r.sites().len(),
+            r.site_count(),
             half,
             half + 2,
             keys,

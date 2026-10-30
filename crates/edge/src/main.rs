@@ -78,8 +78,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         &config.app_id,
         &config.registry_dir,
         &signer.public_key(),
+        config.registry_from_hub,
     )?);
-    tokio::spawn(sites::maintain(sites.clone(), config.reload_interval));
     // No cap on total duration, so long downloads and streams through the edge are never cut
     // off; only connecting and silence between bytes are bounded.
     let http = Client::builder()
@@ -87,6 +87,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .connect_timeout(Duration::from_secs(5))
         .read_timeout(Duration::from_secs(120))
         .build()?;
+    let hub = Arc::new(HubClient::new(
+        http,
+        config.hub_internal_url.clone(),
+        signer,
+    ));
+    if config.registry_from_hub {
+        tokio::spawn(sites::follow_hub(
+            sites.clone(),
+            hub.clone(),
+            config.reload_interval,
+            config.sync_interval,
+        ));
+    } else {
+        tokio::spawn(sites::maintain(sites.clone(), config.reload_interval));
+    }
     let (listen, metrics_addr) = (config.listen, config.metrics_addr);
     info!(app = %config.app_id, sites = sites.count(), "edge configured");
 
@@ -100,11 +115,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         sites,
         tokens: Arc::default(),
         bulkheads: Arc::default(),
-        hub: Arc::new(HubClient::new(
-            http,
-            config.hub_internal_url.clone(),
-            signer,
-        )),
+        hub,
         config: Arc::new(config),
     };
     let app = Router::new()

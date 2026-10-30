@@ -8,8 +8,13 @@
 #                             sites
 #   keys/installation-<id>.key  each native installation's key (Ed25519), for its desktop app;
 #                             an installation may list several, e.g. one per workstation
+#   keys/registry-provisioner.secret  the client secret of Keycloak's registry-provisioner client,
+#                             which stands in for provisioning automation calling the admin API
 #   registry/*.json           registry-templates/*.json with each kind's edge public key and its
-#                             sites' origins in the local cluster (https://<site>.<kind>.broker.localhost)
+#                             sites' origins in the local cluster (https://<site>.<kind>.broker.localhost);
+#                             they seed the cluster's registry store
+#   registry/kinds/*.json     the same without sites: the app kinds the cluster's hub and edges
+#                             read, their installations coming from the store
 #   registry-compose/*.json   the same with the docker compose stack's origins
 #                             (http://<site>.localhost:<the kind's edge port>), for perf/
 #
@@ -38,6 +43,7 @@ base64url() { base64 | tr '+/' '-_' | tr -d '=\n'; }
 hub_key() { openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt; }
 # PKCS#8 DER in base64url, as EDGE_KEY_FILE expects.
 edge_key() { openssl genpkey -algorithm ed25519 -outform DER | base64url; }
+random_secret() { openssl rand -base64 48 | tr -d '/+=\n' | head -c 40; }
 # The registry's edge_public_key: the raw 32-byte Ed25519 public key, base64url.
 edge_public_key() {
   base64 -d <<<"$(tr -- '-_' '+/' < "$1" | sed -e 's/$/===/' -e 's/^\(\(....\)*\).*/\1/')" \
@@ -45,6 +51,7 @@ edge_public_key() {
 }
 
 write_key "$dev/keys/hub-client-key.pem" hub_key
+write_key "$dev/keys/registry-provisioner.secret" random_secret
 
 # Edge keys and native installations' keys, named by their placeholders in the templates.
 edges=$(grep -ho '"@\(edge\|installation\)-[a-z0-9-]*@"' "$dev"/registry-templates/*.json | tr -d '"@' | sort -u)
@@ -80,5 +87,11 @@ for template in "$dev"/registry-templates/*.json; do
     done
     mv "$out.tmp" "$out"
   done
+done
+# The kinds alone, for the cluster's hub and edges, whose installations come from the store.
+mkdir -p "$dev/registry/kinds"
+rm -f "$dev/registry/kinds/"*.json
+for file in "$dev"/registry/*.json; do
+  jq 'del(.sites)' "$file" > "$dev/registry/kinds/$(basename "$file")"
 done
 echo "Registry files written to $dev/registry (cluster) and $dev/registry-compose (docker compose)"

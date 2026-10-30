@@ -42,6 +42,11 @@ spec:
             # The inspection kind's back-channel logout goes through the recorder.
             - { name: relay_kind, value: inspection }
             - { name: relay_url, value: "http://test-helpers:8000/relay/backchannel-logout" }
+            # The registry admin API's provisioning client, standing in for provisioning
+            # automation.
+            - name: registry_provisioner_secret
+              valueFrom:
+                secretKeyRef: { name: registry-provisioner, key: secret }
           volumeMounts:
             - { name: setup, mountPath: /mnt/setup, readOnly: true }
             - { name: registry, mountPath: /mnt/registry, readOnly: true }

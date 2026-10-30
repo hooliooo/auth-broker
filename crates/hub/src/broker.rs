@@ -3,24 +3,26 @@
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, Query, State},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use common::{
     metrics, pkce,
     provider::Logout,
+    registry::KindFeed,
     sealed::{self, Purpose},
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::{
+    admin::{self, AdminError, KeyBody},
     catalog::AppClient,
     error::AppError,
     login::{Handoff, handoff_key, no_store},
     session::{self, SSO_MAX_SECS, fresh_access_token, now},
-    signed::SignedEdge,
+    signed::{SignedEdge, SignedKind},
     state::AppState,
 };
 
@@ -31,6 +33,72 @@ pub fn routes() -> Router<AppState> {
         .route("/broker/session", get(current))
         .route("/broker/logout", post(logout))
         .route("/broker/token", post(token))
+        .route("/broker/keys", post(enroll_key))
+        .route("/broker/keys/{key_id}", delete(revoke_key))
+        .route("/broker/registry", get(kind_registry))
+}
+
+/// `POST /broker/keys`: a native installation, signing with one of its keys, enrolls another, e.g.
+/// for a new workstation. Only with a store.
+async fn enroll_key(
+    State(app): State<AppState>,
+    edge: SignedEdge,
+    Json(body): Json<KeyBody>,
+) -> Result<Response, AdminError> {
+    if !edge.site.is_native() {
+        return Err(AdminError::NotFound);
+    }
+    let enrolled = admin::enroll(
+        &app,
+        &edge.site.id,
+        &body.public_key,
+        edge.key_id.as_deref(),
+    )
+    .await?;
+    Ok(no_store(Json(enrolled).into_response()))
+}
+
+/// `DELETE /broker/keys/{key_id}`: a native installation revokes one of its keys, e.g. of a
+/// retired workstation, or the one signing. Only with a store.
+async fn revoke_key(
+    State(app): State<AppState>,
+    edge: SignedEdge,
+    Path(key_id): Path<String>,
+) -> Result<Response, AdminError> {
+    if !edge.site.is_native() {
+        return Err(AdminError::NotFound);
+    }
+    let revoked = admin::revoke(&app, &edge.site.id, &key_id, edge.key_id.as_deref()).await?;
+    Ok(no_store(Json(revoked).into_response()))
+}
+
+/// Query of `/broker/registry`.
+#[derive(Deserialize)]
+struct FeedQuery {
+    /// The store version the edge has; 0 for everything.
+    #[serde(default)]
+    since: i64,
+}
+
+/// `GET /broker/registry?since=<version>`: the kind's web-app installations for its edge, signed
+/// with the kind's key: every current one, or the changes after `since`. Only with a store; edges
+/// never reach the store themselves.
+async fn kind_registry(
+    State(app): State<AppState>,
+    kind: SignedKind,
+    Query(q): Query<FeedQuery>,
+) -> Result<Response, AppError> {
+    let store = app.store.as_ref().ok_or(AppError::NotFound)?;
+    let (version, changes) = store
+        .web_installations(&kind.app.id, q.since)
+        .await
+        .map_err(|e| AppError::NotReady(e.to_string()))?;
+    let feed = KindFeed {
+        version,
+        full: q.since == 0,
+        changes,
+    };
+    Ok(no_store(Json(feed).into_response()))
 }
 
 /// Body of `/broker/redeem`.

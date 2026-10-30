@@ -119,6 +119,52 @@ JSON
 fi
 bash "$(dirname "$0")/sync_organizations.sh"
 
+# The registry admin API's provisioning client: a service account whose access tokens carry the
+# admin audience and realm role the hub's admin API requires. Its secret comes from the
+# environment and is updated on every run.
+if [[ -n "${registry_provisioner_secret:-}" ]]; then
+  if ! $kcadm get roles -r "$realm" --fields name | grep -q '"registry-admin"'; then
+    $kcadm create roles -r "$realm" -s name=registry-admin
+  fi
+  provisioner=$($kcadm get clients -r "$realm" -q clientId=registry-provisioner --fields id | jq -r '.[0].id // empty')
+  if [[ -z "$provisioner" ]]; then
+    echo "creating client registry-provisioner"
+    $kcadm create clients -r "$realm" -f - <<JSON
+{
+  "clientId": "registry-provisioner",
+  "name": "Registry provisioning",
+  "publicClient": false,
+  "clientAuthenticatorType": "client-secret",
+  "secret": "$registry_provisioner_secret",
+  "standardFlowEnabled": false,
+  "directAccessGrantsEnabled": false,
+  "serviceAccountsEnabled": true,
+  "fullScopeAllowed": false,
+  "defaultClientScopes": ["basic", "roles"],
+  "optionalClientScopes": [],
+  "protocolMappers": [
+    {
+      "name": "registry-admin-audience",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-audience-mapper",
+      "config": {
+        "included.custom.audience": "registry-admin",
+        "access.token.claim": "true",
+        "id.token.claim": "false"
+      }
+    }
+  ]
+}
+JSON
+    provisioner=$($kcadm get clients -r "$realm" -q clientId=registry-provisioner --fields id | jq -r '.[0].id')
+    $kcadm create -r "$realm" "clients/$provisioner/scope-mappings/realm" \
+      -b "[$($kcadm get -r "$realm" roles/registry-admin)]"
+    $kcadm add-roles -r "$realm" --uusername service-account-registry-provisioner --rolename registry-admin
+  else
+    $kcadm update -r "$realm" "clients/$provisioner" -s "secret=$registry_provisioner_secret"
+  fi
+fi
+
 # A pool of test users with every kind's role (the realm's brute-force protection locks a user
 # who signs in several times within a second, so each e2e sign-in takes its own user), one with
 # no role at all, and one with every role but no site. Created over the admin REST API,

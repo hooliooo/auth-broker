@@ -24,7 +24,7 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Url;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use ring::digest::{SHA256, digest};
@@ -33,6 +33,10 @@ use crate::crypto::hash_key;
 
 /// Prefix of a kind's `edge_public_key` in the registry.
 pub const KEY_PREFIX: &str = "ed25519:";
+
+/// The prefix of the `x-site-id` an edge signs with when it speaks for its whole kind rather than
+/// one installation, e.g. `kind:inspection`; never a valid installation id.
+pub const KIND_SIGNER_PREFIX: &str = "kind:";
 
 /// One team's registry file.
 #[derive(Debug, Deserialize)]
@@ -423,6 +427,12 @@ pub enum RegistryError {
     /// Two sites share an origin.
     #[error("site '{0}': origin is already used by another site")]
     DuplicateOrigin(String),
+    /// A record names a kind the registry does not have: the site and the kind.
+    #[error("site '{0}': unknown app kind '{1}'")]
+    UnknownKind(String, String),
+    /// A kind's document lists sites in a registry whose installations come from a store.
+    #[error("app '{0}': installations come from the store, so its document must not list sites")]
+    SitesInStore(String),
     /// Another site of the same kind answers to the same `Host` header, e.g. `http://x` and
     /// `https://x`: the header has no scheme, so the edge could not tell them apart.
     #[error("site '{0}': another site of its kind has the same host and port")]
@@ -471,18 +481,144 @@ pub enum RegistryError {
     InvalidTenant(String),
 }
 
-/// Every app kind and site the hub serves, validated together and indexed.
+/// Every app kind and site the hub serves, validated and indexed: an indexed snapshot, plus the
+/// installations changed since it was built ([`Registry::with_changes`]), so applying a change
+/// costs as much as the change, not as much as the registry. Cheap to clone.
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
     /// The app kinds, one per document.
     apps: Vec<App>,
-    /// Every kind's sites.
+    /// The sites the registry was built with, indexed.
+    base: Arc<Snapshot>,
+    /// Installations changed since `base` was built.
+    changes: Arc<Changes>,
+}
+
+/// Indexed sites.
+#[derive(Debug, Default)]
+struct Snapshot {
+    /// Every site.
     sites: Vec<Site>,
     /// Index into `sites` by id: the hub looks a site up on every signed request.
     by_id: HashMap<String, usize>,
     /// Index into `sites` by kind and `Host` header ([`host_key`]): the edge looks a site up on
     /// every request.
     by_host: HashMap<String, usize>,
+}
+
+impl Snapshot {
+    /// Indexes `sites`, whose ids and host keys are unique.
+    fn new(sites: Vec<Site>) -> Self {
+        let mut snapshot = Self {
+            sites,
+            ..Self::default()
+        };
+        for (i, site) in snapshot.sites.iter().enumerate() {
+            snapshot.by_id.insert(site.id.clone(), i);
+            for key in host_keys(site) {
+                snapshot.by_host.insert(key, i);
+            }
+        }
+        snapshot
+    }
+}
+
+/// Installations changed since a snapshot was built.
+#[derive(Clone, Debug, Default)]
+struct Changes {
+    /// Each changed installation by id: its current site, or `None` once removed.
+    sites: HashMap<String, Option<Site>>,
+    /// The id of the changed site each host key was last given to; checked on lookup, as the
+    /// site may have moved since.
+    by_host: HashMap<String, String>,
+}
+
+/// An installation as a store keeps it, to be validated against its kind: see
+/// [`Registry::with_installations`] and [`Registry::with_changes`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallationRecord {
+    /// See [`Site::id`].
+    pub id: String,
+    /// See [`Site::app_id`].
+    pub kind: String,
+    /// See [`Access::Web`]; for a web-app installation.
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// See [`Access::Native`], each as `ed25519:<base64url>`: a native installation's keys
+    /// in use.
+    #[serde(default)]
+    pub keys: Vec<String>,
+    /// See [`Site::api_url`].
+    #[serde(default)]
+    pub api_url: Option<String>,
+    /// See [`Site::tenant`].
+    pub tenant: String,
+    /// See [`Site::enabled`].
+    pub enabled: bool,
+    /// See [`Site::login_per_minute`].
+    #[serde(default)]
+    pub login_per_minute: Option<u64>,
+}
+
+/// A kind's web-app installations as the hub sends them to the kind's edge: every current one
+/// when `full`, otherwise those that changed after the version the edge asked from, a removed
+/// one as `None`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KindFeed {
+    /// The store version this is as of; the edge asks from it next.
+    pub version: i64,
+    /// Whether `changes` holds every current installation rather than changes.
+    pub full: bool,
+    /// Each installation by id, with its record or `None` if removed.
+    pub changes: Vec<(String, Option<InstallationRecord>)>,
+}
+
+impl InstallationRecord {
+    /// The file form of this record, for [`validate_site`].
+    fn entry(&self) -> SiteEntry {
+        SiteEntry {
+            id: self.id.clone(),
+            origin: self.origin.clone(),
+            keys: self.keys.clone(),
+            api_url: self.api_url.clone(),
+            tenant: self.tenant.clone(),
+            enabled: self.enabled,
+            login_per_minute: self.login_per_minute,
+        }
+    }
+
+    /// Whether this is a native installation that has no key yet: it can do nothing until one
+    /// is enrolled, so registries leave it out.
+    pub fn awaits_a_key(&self) -> bool {
+        self.origin.is_none() && self.keys.is_empty()
+    }
+}
+
+/// `record` validated as an installation of `app`, as a store's writer checks it before
+/// writing. Unlike a registry, it accepts a native installation without keys.
+pub fn validate_installation(
+    record: &InstallationRecord,
+    app: &App,
+) -> Result<Site, RegistryError> {
+    if record.kind != app.id {
+        return Err(RegistryError::UnknownKind(
+            record.id.clone(),
+            record.kind.clone(),
+        ));
+    }
+    validate_site(record.entry(), app, true)
+}
+
+/// A web-app installation's hosts as its kind's edge sees them: with its port, and without it
+/// when the port is its scheme's default; `None` for a native installation. What a store keeps
+/// unique per kind.
+pub fn web_hosts(site: &Site) -> Option<(String, Option<String>)> {
+    let mut keys = host_keys(site).into_iter().map(|key| {
+        key.split_once('\n')
+            .map(|(_, host)| host.to_owned())
+            .unwrap_or_default()
+    });
+    Some((keys.next()?, keys.next()))
 }
 
 /// The [`Registry::by_host`] key of `host` (lowercase) at kind `app_id`'s edge.
@@ -519,7 +655,24 @@ impl Registry {
     pub fn from_documents<'a>(
         documents: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> Result<Self, RegistryError> {
-        let mut registry = Registry::default();
+        Self::build(documents, true)
+    }
+
+    /// The kinds in every team's document, without installations, for a registry whose
+    /// installations come from a store ([`Registry::with_installations`]); a document that lists
+    /// sites is refused.
+    pub fn kinds_from_documents<'a>(
+        documents: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self, RegistryError> {
+        Self::build(documents, false)
+    }
+
+    /// [`Registry::from_documents`], refusing sites unless `allow_sites`.
+    fn build<'a>(
+        documents: impl IntoIterator<Item = (&'a str, &'a str)>,
+        allow_sites: bool,
+    ) -> Result<Self, RegistryError> {
+        let (mut apps, mut sites) = (Vec::new(), Vec::new());
         // Edge and installation keys share one set, and their ids another: no key, nor any id,
         // may speak for two of them.
         let (mut app_ids, mut clients, mut site_ids, mut origins, mut keys, mut key_ids) = (
@@ -547,8 +700,11 @@ impl Registry {
             {
                 return Err(RegistryError::DuplicateEdgeKey(app.id));
             }
+            if !allow_sites && !document.sites.is_empty() {
+                return Err(RegistryError::SitesInStore(app.id));
+            }
             for entry in document.sites {
-                let site = validate_site(entry, &app)?;
+                let site = validate_site(entry, &app, false)?;
                 if !site_ids.insert(site.id.clone()) {
                     return Err(RegistryError::DuplicateId(site.id));
                 }
@@ -567,36 +723,131 @@ impl Registry {
                 {
                     return Err(RegistryError::DuplicateKey(site.id));
                 }
-                registry.sites.push(site);
+                sites.push(site);
             }
-            registry.apps.push(app);
+            apps.push(app);
         }
-        registry.index();
-        Ok(registry)
+        Ok(Self {
+            apps,
+            base: Arc::new(Snapshot::new(sites)),
+            changes: Arc::default(),
+        })
     }
 
-    /// Builds the lookup indexes, after validation has made every id and host key unique.
-    fn index(&mut self) {
-        for (i, site) in self.sites.iter().enumerate() {
-            self.by_id.insert(site.id.clone(), i);
-            for key in host_keys(site) {
-                self.by_host.insert(key, i);
+    /// This registry's kinds with exactly `records` as their installations, from a store that
+    /// has kept ids, origins, host keys and keys unique. A record that fails validation, names
+    /// an unknown kind or repeats what an earlier one holds is left out and returned with the
+    /// reason; a native installation awaiting its first key is left out silently.
+    pub fn with_installations(
+        &self,
+        records: impl IntoIterator<Item = InstallationRecord>,
+    ) -> (Self, Vec<(String, RegistryError)>) {
+        let (mut sites, mut rejected) = (Vec::new(), Vec::new());
+        let (mut ids, mut hosts, mut keys) = (HashSet::new(), HashSet::new(), HashSet::new());
+        keys.extend(self.apps.iter().filter_map(|app| app.edge_public_key));
+        for record in records {
+            let site = match self.validate_record(&record) {
+                Ok(Some(site)) => site,
+                Ok(None) => continue,
+                Err(error) => {
+                    rejected.push((record.id, error));
+                    continue;
+                }
+            };
+            let unique = ids.insert(site.id.clone())
+                && host_keys(&site).into_iter().all(|key| hosts.insert(key))
+                && site.keys().iter().all(|key| keys.insert(key.key));
+            if unique {
+                sites.push(site);
+            } else {
+                rejected.push((site.id.clone(), RegistryError::DuplicateId(site.id)));
             }
         }
+        let registry = Self {
+            apps: self.apps.clone(),
+            base: Arc::new(Snapshot::new(sites)),
+            changes: Arc::default(),
+        };
+        (registry, rejected)
+    }
+
+    /// This registry with the installations in `changes` replaced: each by its new record, or
+    /// removed with `None`. Copies only the changes so far, never the snapshot. A record that
+    /// fails validation removes the installation and is returned with the reason.
+    pub fn with_changes(
+        &self,
+        changes: impl IntoIterator<Item = (String, Option<InstallationRecord>)>,
+    ) -> (Self, Vec<(String, RegistryError)>) {
+        let mut next = (*self.changes).clone();
+        let mut rejected = Vec::new();
+        for (id, record) in changes {
+            let site = record.and_then(|record| match self.validate_record(&record) {
+                Ok(site) => site,
+                Err(error) => {
+                    rejected.push((id.clone(), error));
+                    None
+                }
+            });
+            if let Some(site) = &site {
+                for key in host_keys(site) {
+                    next.by_host.insert(key, id.clone());
+                }
+            }
+            next.sites.insert(id, site);
+        }
+        let registry = Self {
+            apps: self.apps.clone(),
+            base: self.base.clone(),
+            changes: Arc::new(next),
+        };
+        (registry, rejected)
+    }
+
+    /// The same registry with its changes folded into a new snapshot.
+    pub fn compacted(&self) -> Self {
+        Self {
+            apps: self.apps.clone(),
+            base: Arc::new(Snapshot::new(self.sites().cloned().collect())),
+            changes: Arc::default(),
+        }
+    }
+
+    /// How many installations changed since the snapshot was built.
+    pub fn pending_changes(&self) -> usize {
+        self.changes.sites.len()
+    }
+
+    /// `record` as a site of its kind, or `None` for a native installation awaiting its first
+    /// key.
+    fn validate_record(&self, record: &InstallationRecord) -> Result<Option<Site>, RegistryError> {
+        if record.awaits_a_key() {
+            return Ok(None);
+        }
+        let app = self
+            .app(&record.kind)
+            .ok_or_else(|| RegistryError::UnknownKind(record.id.clone(), record.kind.clone()))?;
+        validate_site(record.entry(), app, false).map(Some)
     }
 
     /// This registry narrowed to kind `app_id` and its sites, re-indexed. For an edge, which
     /// validates the whole set as the hub does, so both accept and refuse the same changes, but
     /// serves one kind and need not hold the others.
-    pub fn only_kind(mut self, app_id: &str) -> Self {
-        self.apps.retain(|app| app.id == app_id);
-        self.sites.retain(|site| site.app_id == app_id);
-        self.apps.shrink_to_fit();
-        self.sites.shrink_to_fit();
-        self.by_id = HashMap::new();
-        self.by_host = HashMap::new();
-        self.index();
-        self
+    pub fn only_kind(&self, app_id: &str) -> Self {
+        Self {
+            apps: self
+                .apps
+                .iter()
+                .filter(|app| app.id == app_id)
+                .cloned()
+                .collect(),
+            base: Arc::new(Snapshot::new(
+                self.sites()
+                    .filter(|site| site.app_id == app_id)
+                    .cloned()
+                    .collect(),
+            )),
+            changes: Arc::default(),
+        }
     }
 
     /// Every app kind.
@@ -605,8 +856,18 @@ impl Registry {
     }
 
     /// Every site, enabled or not.
-    pub fn sites(&self) -> &[Site] {
-        &self.sites
+    pub fn sites(&self) -> impl Iterator<Item = &Site> {
+        let changes = &self.changes.sites;
+        self.base
+            .sites
+            .iter()
+            .filter(|site| !changes.contains_key(&site.id))
+            .chain(changes.values().flatten())
+    }
+
+    /// How many sites there are, enabled or not.
+    pub fn site_count(&self) -> usize {
+        self.sites().count()
     }
 
     /// The app kind `id`.
@@ -616,7 +877,10 @@ impl Registry {
 
     /// Any registered site, enabled or not.
     pub fn get(&self, id: &str) -> Option<&Site> {
-        self.by_id.get(id).map(|&i| &self.sites[i])
+        match self.changes.sites.get(id) {
+            Some(changed) => changed.as_ref(),
+            None => self.base.by_id.get(id).map(|&i| &self.base.sites[i]),
+        }
     }
 
     /// An enabled site and its app: the only sites allowed to sign users in and
@@ -630,10 +894,20 @@ impl Registry {
     /// `host` is for: the same host, ignoring case, and the same port, the scheme's default if
     /// none is given.
     pub fn site_for_host(&self, app_id: &str, host: &str) -> Option<&Site> {
-        let i = *self
+        let key = host_key(app_id, &host.to_ascii_lowercase());
+        // A changed site that still answers to the host...
+        let changed = self
+            .changes
             .by_host
-            .get(&host_key(app_id, &host.to_ascii_lowercase()))?;
-        Some(&self.sites[i]).filter(|site| site.enabled)
+            .get(&key)
+            .and_then(|id| self.get(id))
+            .filter(|site| host_keys(site).contains(&key));
+        // ...or the snapshot's, unless it has changed since.
+        let site = changed.or_else(|| {
+            let site = &self.base.sites[*self.base.by_host.get(&key)?];
+            (!self.changes.sites.contains_key(&site.id)).then_some(site)
+        })?;
+        Some(site).filter(|site| site.enabled)
     }
 }
 
@@ -765,7 +1039,9 @@ fn validate_app(entry: AppEntry) -> Result<App, RegistryError> {
 }
 
 /// `entry`, a site of `app`, checked and with its defaults filled in.
-fn validate_site(entry: SiteEntry, app: &App) -> Result<Site, RegistryError> {
+/// `entry` validated as a site of `app`; a native installation without keys only if
+/// `allow_no_keys`.
+fn validate_site(entry: SiteEntry, app: &App, allow_no_keys: bool) -> Result<Site, RegistryError> {
     let id = entry.id;
     if !valid_id(&id) {
         return Err(RegistryError::InvalidId(id));
@@ -800,6 +1076,14 @@ fn validate_site(entry: SiteEntry, app: &App) -> Result<Site, RegistryError> {
                 .collect::<Result<Vec<_>, RegistryError>>()?;
             Access::Native {
                 keys: Arc::new(InstallationKeys::new(keys)),
+            }
+        }
+        (None, true) if allow_no_keys => {
+            if app.native.is_none() {
+                return Err(RegistryError::NoNativeSettings(id));
+            }
+            Access::Native {
+                keys: Arc::new(InstallationKeys::new(Vec::new())),
             }
         }
         _ => return Err(RegistryError::SiteAccess(id)),
@@ -929,7 +1213,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(r.apps().len(), 2);
-        assert_eq!(r.sites().len(), 3);
+        assert_eq!(r.site_count(), 3);
         let (site, app) = r.enabled("plant-c").unwrap();
         assert_eq!(app.id, "billing");
         assert_eq!(app.client_id, "hub-billing");
@@ -1215,6 +1499,198 @@ mod tests {
         );
     }
 
+    /// The inspection kind with an edge key and native settings, and no sites.
+    fn kinds() -> Registry {
+        let doc = format!(
+            r#"{{ "app": {{ "id": "inspection", "client_id": "hub-inspection", "edge_public_key": "{}", "native": {{}}, "api_audience": "i" }} }}"#,
+            key("inspection")
+        );
+        Registry::kinds_from_documents([("i.json", doc.as_str())]).unwrap()
+    }
+
+    /// A store's record of a web-app installation at `origin`, or a native one with `keys`.
+    fn record(id: &str, origin: Option<&str>, keys: &[&str]) -> InstallationRecord {
+        InstallationRecord {
+            id: id.into(),
+            kind: "inspection".into(),
+            origin: origin.map(Into::into),
+            keys: keys.iter().map(|name| key(name)).collect(),
+            api_url: Some("https://api.example".into()),
+            tenant: "t".into(),
+            enabled: true,
+            login_per_minute: None,
+        }
+    }
+
+    #[test]
+    fn given_store_records_then_the_registry_holds_the_valid_ones() {
+        let mut bad_origin = record("plant-x", Some("ftp://x.example"), &[]);
+        bad_origin.api_url = None;
+        let (r, rejected) = kinds().with_installations([
+            record("plant-a", Some("https://plant-a.example"), &[]),
+            record("plant-i", None, &["i"]),
+            record("plant-new", None, &[]),
+            bad_origin,
+            InstallationRecord {
+                kind: "billing".into(),
+                ..record("plant-c", None, &["c"])
+            },
+        ]);
+        assert_eq!(r.site_count(), 2);
+        assert!(
+            r.get("plant-new").is_none(),
+            "awaits its first key, silently"
+        );
+        let reasons: Vec<&str> = rejected.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(reasons, ["plant-x", "plant-c"]);
+        assert_eq!(
+            r.site_for_host("inspection", "plant-a.example").unwrap().id,
+            "plant-a"
+        );
+    }
+
+    #[test]
+    fn given_documents_with_sites_then_kinds_for_a_store_are_refused() {
+        let doc = document(
+            "inspection",
+            "c",
+            &[site("plant-a", "https://plant-a.example")],
+        );
+        assert_eq!(
+            Registry::kinds_from_documents([("i.json", doc.as_str())]).unwrap_err(),
+            RegistryError::SitesInStore("inspection".into())
+        );
+    }
+
+    #[test]
+    fn given_changes_then_lookups_see_them_and_the_snapshot_is_shared() {
+        let (r, _) = kinds().with_installations([
+            record("plant-a", Some("https://plant-a.example"), &[]),
+            record("plant-b", Some("https://plant-b.example"), &[]),
+            record("plant-i", None, &["i"]),
+        ]);
+        let (changed, rejected) = r.with_changes([
+            // plant-a moves host; plant-b is removed; plant-i gets a second key; plant-n is new.
+            (
+                "plant-a".into(),
+                Some(record("plant-a", Some("https://moved.example"), &[])),
+            ),
+            ("plant-b".into(), None),
+            (
+                "plant-i".into(),
+                Some(record("plant-i", None, &["i", "i-2"])),
+            ),
+            (
+                "plant-n".into(),
+                Some(record("plant-n", Some("https://plant-n.example"), &[])),
+            ),
+        ]);
+        assert!(rejected.is_empty());
+        assert!(
+            Arc::ptr_eq(&r.base, &changed.base),
+            "the snapshot is not copied"
+        );
+        assert_eq!(changed.pending_changes(), 4);
+        assert!(
+            changed
+                .site_for_host("inspection", "plant-a.example")
+                .is_none(),
+            "its old host"
+        );
+        assert_eq!(
+            changed
+                .site_for_host("inspection", "moved.example")
+                .unwrap()
+                .id,
+            "plant-a"
+        );
+        assert!(changed.get("plant-b").is_none());
+        assert!(
+            changed
+                .site_for_host("inspection", "plant-b.example")
+                .is_none()
+        );
+        assert_eq!(changed.get("plant-i").unwrap().keys().len(), 2);
+        assert_eq!(
+            changed
+                .site_for_host("inspection", "plant-n.example")
+                .unwrap()
+                .id,
+            "plant-n"
+        );
+        assert_eq!(changed.site_count(), 3);
+        assert_eq!(r.site_count(), 3, "the original is untouched");
+        assert!(r.get("plant-b").is_some());
+
+        // Moving again leaves no trace at the intermediate host; compacting changes nothing seen.
+        let (again, _) = changed.with_changes([(
+            "plant-a".into(),
+            Some(record("plant-a", Some("https://third.example"), &[])),
+        )]);
+        assert!(again.site_for_host("inspection", "moved.example").is_none());
+        let compacted = again.compacted();
+        assert_eq!(compacted.pending_changes(), 0);
+        for host in [
+            "plant-a.example",
+            "moved.example",
+            "third.example",
+            "plant-b.example",
+            "plant-n.example",
+        ] {
+            assert_eq!(
+                compacted
+                    .site_for_host("inspection", host)
+                    .map(|s| s.id.clone()),
+                again
+                    .site_for_host("inspection", host)
+                    .map(|s| s.id.clone()),
+                "{host}"
+            );
+        }
+        let mut ids: Vec<&str> = compacted.sites().map(|s| s.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["plant-a", "plant-i", "plant-n"]);
+    }
+
+    #[test]
+    fn given_an_invalid_change_then_the_installation_is_removed_and_the_reason_returned() {
+        let (r, _) =
+            kinds().with_installations([record("plant-a", Some("https://plant-a.example"), &[])]);
+        let (changed, rejected) = r.with_changes([(
+            "plant-a".into(),
+            Some(record("plant-a", Some("http://plant-a.example"), &[])),
+        )]);
+        assert_eq!(
+            rejected,
+            [(
+                "plant-a".into(),
+                RegistryError::InsecureOrigin("plant-a".into())
+            )]
+        );
+        assert!(
+            changed.get("plant-a").is_none(),
+            "never kept in a state the rules refuse"
+        );
+    }
+
+    #[test]
+    fn given_a_writer_then_a_native_installation_may_await_its_first_key() {
+        let r = kinds();
+        let app = r.app("inspection").unwrap();
+        let site = validate_installation(&record("plant-new", None, &[]), app).unwrap();
+        assert!(site.is_native() && site.keys().is_empty());
+        let web = validate_installation(
+            &record("plant-a", Some("https://plant-a.example:443"), &[]),
+            app,
+        )
+        .unwrap();
+        assert_eq!(
+            web_hosts(&web),
+            Some(("plant-a.example:443".into(), Some("plant-a.example".into())))
+        );
+        assert_eq!(web_hosts(&site), None);
+    }
+
     #[test]
     fn given_few_or_many_keys_then_each_is_found_by_its_id() {
         for count in [
@@ -1268,7 +1744,7 @@ mod tests {
         .unwrap()
         .only_kind("inspection");
         assert_eq!(r.apps().len(), 1);
-        assert_eq!(r.sites().len(), 1);
+        assert_eq!(r.site_count(), 1);
         assert_eq!(
             r.site_for_host("inspection", "plant-a.example").unwrap().id,
             "plant-a"
@@ -1409,7 +1885,6 @@ mod tests {
             let indexed = r.site_for_host("inspection", host).map(|s| s.id.clone());
             let scanned = r
                 .sites()
-                .iter()
                 .find(|s| s.serves_host(host))
                 .map(|s| s.id.clone());
             assert_eq!(indexed, scanned, "{host}");

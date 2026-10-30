@@ -138,7 +138,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", installation()?.sign_out(&session()?).await?);
             let _ = std::fs::remove_file(session_file());
         }
-        _ => return Err("usage: native-app keygen <site> <key file> | sign-in | whoami | token | call <url> | sign-out".into()),
+        ["enroll", key_file] => {
+            let installation = installation()?;
+            let new_key = std::fs::read_to_string(key_file)?;
+            let public = common::signing::EdgeSigner::from_base64("enroll", new_key.trim())?.public_key();
+            println!("{}", installation.enroll(&public).await?);
+        }
+        ["revoke-key", key_id] => installation()?.revoke_key(key_id).await?,
+        _ => return Err("usage: native-app keygen <site> <key file> | sign-in | whoami | token | call <url> | sign-out | enroll <new key file> | revoke-key <key id>".into()),
     }
     Ok(())
 }

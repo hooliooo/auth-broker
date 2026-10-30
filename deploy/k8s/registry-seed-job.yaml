@@ -1,0 +1,32 @@
+# Seeds the registry store with the installations in this checkout's registry files
+# (dev/registry, seen at /registry): creates or updates each and adds the keys it lacks, so it
+# is safe on every pass. Installations created through the admin API since are kept. Applied by
+# dev/k8s/up.sh, after the store is up and before the hub restarts.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: registry-seed
+  namespace: auth-broker
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: seed
+          image: auth-broker-kind-edge:dev
+          imagePullPolicy: Never
+          args: ["hub", "import-registry", "/etc/hub/registry"]
+          env:
+            - name: REGISTRY_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: registry-db, key: password }
+            - name: REGISTRY_DATABASE_URL
+              value: "postgres://hub:$(REGISTRY_DB_PASSWORD)@registry-postgres:5432/registry"
+          volumeMounts:
+            - { name: registry, mountPath: /etc/hub/registry, readOnly: true }
+      volumes:
+        - name: registry
+          hostPath:
+            path: /registry
+            type: Directory
