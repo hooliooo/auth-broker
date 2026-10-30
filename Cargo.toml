@@ -1,7 +1,8 @@
 [workspace]
 resolver = "3"
 # The auth broker and the auth hub: one hub for every kind of on-premise application, an edge
-# per site, the library both share, and their tests. `oidc` is auth-api's token
+# per site, the library both share, and their tests; `native-app` is a stand-in desktop app
+# for native installations. `oidc` is auth-api's token
 # verification crate; `test-helpers` is the BFF's e2e helper service.
 members = [
   "crates/oidc",
@@ -12,6 +13,7 @@ members = [
   "crates/hub",
   "crates/keycloak",
   "crates/test-helpers",
+  "crates/native-app",
 ]
 
 [workspace.dependencies]

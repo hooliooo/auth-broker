@@ -112,10 +112,12 @@ async fn login(
     CurrentSite(site): CurrentSite,
     Query(q): Query<LoginQuery>,
 ) -> Result<Response, EdgeError> {
+    // Every site an edge serves has an origin: it was matched by its host.
+    let origin = site.origin.as_ref().ok_or(EdgeError::UnknownSite)?;
     let login = LoginCookie {
         state: random_token()?,
         verifier: pkce::new_verifier()?,
-        return_to: return_url::sanitize(q.return_url.as_deref(), &site.origin),
+        return_to: return_url::sanitize(q.return_url.as_deref(), origin),
     };
     let mut url = app
         .config

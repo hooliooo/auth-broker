@@ -1,0 +1,33 @@
+{
+  "app": {
+    "id": "planner",
+    "client_id": "hub-planner",
+    "native": { "redirect_path": "/callback" },
+    "api_audience": "planner-api",
+    "scopes": "openid profile email",
+    "required_role": "planner-user"
+  },
+  "sites": [
+    {
+      "enabled": true,
+      "id": "plant-f",
+      "keys": ["@installation-plant-f@", "@installation-plant-f-desk-2@"],
+      "api_url": "http://localhost:8185",
+      "tenant": "customer6"
+    },
+    {
+      "enabled": true,
+      "id": "plant-g",
+      "keys": ["@installation-plant-g@"],
+      "api_url": "http://localhost:8185",
+      "tenant": "customer7"
+    },
+    {
+      "enabled": false,
+      "id": "plant-h",
+      "keys": ["@installation-plant-h@"],
+      "api_url": "http://localhost:8185",
+      "tenant": "customer8"
+    }
+  ]
+}

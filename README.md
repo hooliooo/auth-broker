@@ -23,6 +23,7 @@ an edge per kind; see the RFC "One edge per app kind". What changed:
 | `crates/common`                                        | what hub and edge share: signing, the registry, cookies, CSRF, PKCE, sealing, header rules, the client's credentials and IP address (`client`, laid out as the Rust BFF's), request ids, metrics, and the identity provider trait                                                                                        |
 | `crates/oidc`                                          | standard OpenID Connect: discovery, token verification, back-channel logout tokens                                                                                                                                                                                                                                       |
 | `crates/keycloak`                                      | Keycloak as an identity provider (see [Identity providers](#identity-providers))                                                                                                                                                                                                                                         |
+| `crates/native-app`                                    | the desktop side of a native installation: sign-in through the system browser with a loopback redirect, and requests signed with the installation's key (a library, and a command-line stand-in for a desktop app)                                                                                                       |
 | `crates/test-api`, `crates/test-helpers`, `crates/e2e` | a stand-in API, a Keycloak fault proxy and logout-token recorder, and the end-to-end tests                                                                                                                                                                                                                               |
 | `providers/keycloak`                                   | the Keycloak image with the membership extension (`extension/`), its admin-tools image (`config/`), and the realm and organization scripts (`setup/`)                                                                                                                                                                    |
 | `dev/`                                                 | local key generation, the registry templates, and the local cluster's scripts (`dev/k8s/`)                                                                                                                                                                                                                               |
@@ -109,8 +110,52 @@ are.
   choose; its sites then have no `api_url`.
 - `origin`: one hostname per site, pointing at the kind's edge. The edge tells sites apart by it,
   so each site keeps its own cookies.
+- `native` instead of `edge_public_key` makes the kind's installations desktop apps (see
+  [Native installations](#native-installations)): each installation lists its own `keys`
+  instead of an `origin`, and `native.redirect_path` (default `/callback`) is its app's loopback
+  path.
 
 Check a change before submitting it: `hub validate-registry <dir>`.
+
+## Native installations
+
+A kind whose installations are desktop apps on the customer's premises is **native**: its app
+signs users in through the hub, and Keycloak has one client per kind, never one per
+installation (RFC 8252, OAuth 2.0 for Native Apps; see the RFC "Native installations").
+
+```json
+{ "app": { "id": "planner", "client_id": "hub-planner", "native": { "redirect_path": "/callback" },
+           "api_audience": "planner-api" },
+  "sites": [ { "id": "plant-f", "keys": ["ed25519:…", "ed25519:…"], "api_url": "https://api.plant-f.example",
+               "tenant": "customer6" } ] }
+```
+
+1. The desktop app listens on `127.0.0.1` at a free port and opens the system browser at
+   `{hub}/broker/login?site=plant-f&redirect_uri=http://127.0.0.1:<port>/callback&state=…&code_challenge=…`.
+2. The hub accepts only a loopback redirect with the kind's path (any port; never `localhost`),
+   signs the user in with the kind's client and the installation's organization, keeps the
+   refresh token, and sends the browser back to the loopback address with a one-time code.
+3. The app redeems the code with its PKCE verifier at `/broker/redeem`, in a request signed with
+   the installation's key, and keeps the session handle it gets; then it fetches short-lived
+   access tokens from `/broker/token` the same way, for its API.
+
+Every request is signed with the installation's own Ed25519 key, so the hub knows which
+installation is calling; an installation may list several keys, e.g. one per workstation.
+`native-app keygen <installation> <key file>` makes a key and prints its registry entry.
+Retiring an installation (`"enabled": false`) or removing a key refuses its next request.
+
+In the local cluster, the native kind `planner` has the installations `plant-f` (two
+workstation keys), `plant-g` and the retired `plant-h`; their keys are in
+`dev/keys/installation-*.key` and their API at `http://localhost:8185`. To sign in through your
+own browser:
+
+```
+NATIVE_HUB_URL=https://hub.broker.localhost NATIVE_HUB_ADDR=127.0.0.1:443 \
+NATIVE_SITE_ID=plant-f NATIVE_KEY_FILE=dev/keys/installation-plant-f.key \
+  cargo run -p native-app -- sign-in
+cargo run -p native-app -- call http://localhost:8185/reports
+cargo run -p native-app -- sign-out
+```
 
 ## Hub settings
 
@@ -348,7 +393,7 @@ machine by themselves (Safari does not), so no hosts-file entries are needed:
 - **Test helpers**: a proxy in front of Keycloak that tests can make fail, answering at
   Keycloak's own address for the hub only, and a recorder of back-channel logout tokens. The
   tests reach Redis, the hub's metrics, the helpers and the stand-in APIs on `127.0.0.1`
-  ports 6380, 8091, 5290 and 8181–8184.
+  ports 6380, 8091, 5290 and 8181–8185.
 - **The organization sync** is a suspended CronJob; run it with
   `kubectl --context kind-auth-broker -n auth-broker create job sync-now --from=cronjob/organization-sync`.
 

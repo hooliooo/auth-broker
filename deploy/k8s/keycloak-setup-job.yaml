@@ -33,8 +33,8 @@ spec:
               valueFrom:
                 secretKeyRef: { name: keycloak-admin, key: password }
             - { name: realm, value: broker }
-            - { name: app_kinds, value: "inspection billing maintenance" }
-            - { name: direct_kinds, value: "inspection maintenance" }
+            - { name: app_kinds, value: "inspection billing maintenance planner" }
+            - { name: direct_kinds, value: "inspection maintenance planner" }
             # The hub as browsers reach it (its callback), and as Keycloak does (its keys and
             # back-channel logouts), inside the cluster.
             - { name: hub_public_url, value: "https://hub.broker.localhost" }

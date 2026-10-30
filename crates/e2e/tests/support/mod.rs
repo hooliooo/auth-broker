@@ -99,6 +99,8 @@ pub const ECHO_MAINT_D: &str = "http://localhost:8183";
 pub const ECHO_MAINT_E: &str = "http://localhost:8184";
 /// Has every kind's role but is a member of no site.
 pub const USER_OUTSIDER: &str = "test-user-outsider";
+/// The native kind's API, which its desktop installations call from this machine.
+pub const ECHO_PLANNER: &str = "http://localhost:8185";
 /// The stand-in APIs, reachable directly only so tests can present a token to the wrong kind.
 pub const ECHO_INSPECTION: &str = "http://localhost:8181";
 pub const ECHO_BILLING: &str = "http://localhost:8182";
@@ -1033,4 +1035,72 @@ pub async fn organization(alias: &str) -> serde_json::Value {
         .json()
         .await
         .unwrap()
+}
+
+/// Native installation key `name` (`dev/keys/installation-<name>.key`), as its desktop app holds it.
+pub fn installation_key(name: &str) -> String {
+    std::fs::read_to_string(format!(
+        "{}/../../dev/keys/installation-{name}.key",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("the installation's key exists; dev/k8s/up.sh creates it")
+}
+
+/// Native installation `site_id`'s desktop app, signing with `key` (see [`installation_key`]).
+pub fn installation_with(site_id: &str, key: &str) -> native_app::Installation {
+    native_app::Installation::new(Url::parse(HUB).unwrap(), site_id, key, client()).unwrap()
+}
+
+/// Native installation `site_id`'s desktop app, with its own key.
+pub fn installation(site_id: &str) -> native_app::Installation {
+    installation_with(site_id, &installation_key(site_id))
+}
+
+/// Plays the system browser for a native app's sign-in at hub URL `url` as `user`: through the
+/// hub and Keycloak's login form, and back to the app's loopback address, where the app takes
+/// the code. Returns the hub's answer to the provider's redirect, for tests that expect the hub
+/// to refuse.
+pub async fn sign_in_in_system_browser(url: &Url, user: &str) -> Response {
+    let mut browser = Browser::new();
+    let started = browser.get(url.as_str()).await;
+    assert_eq!(
+        started.status(),
+        StatusCode::SEE_OTHER,
+        "the hub starts the sign-in"
+    );
+    let page = browser.get(location(&started).as_str()).await;
+    assert_eq!(
+        page.status(),
+        StatusCode::OK,
+        "Keycloak shows its login page"
+    );
+    let submitted = submit_credentials(&mut browser, page, user).await;
+    assert_eq!(
+        submitted.status(),
+        StatusCode::FOUND,
+        "Keycloak accepts the credentials"
+    );
+    let at_hub = browser.get(location(&submitted).as_str()).await;
+    if at_hub.status() == StatusCode::SEE_OTHER {
+        // Back to the app's loopback address, as the system browser would follow it.
+        let back = location(&at_hub);
+        assert_eq!(
+            back.host_str(),
+            Some("127.0.0.1"),
+            "only to the loopback address"
+        );
+        let _ = browser.get(back.as_str()).await;
+    }
+    at_hub
+}
+
+/// Signs `user` in at native installation `app`, as its desktop app does with the system browser.
+pub async fn native_sign_in(app: &native_app::Installation, user: &str) -> native_app::Session {
+    let sign_in = app.begin_sign_in("/callback").await.unwrap();
+    let url = sign_in.url().clone();
+    let (session, _) = tokio::join!(
+        app.finish_sign_in(sign_in, Duration::from_secs(30)),
+        sign_in_in_system_browser(&url, user)
+    );
+    session.expect("the app redeems the code")
 }

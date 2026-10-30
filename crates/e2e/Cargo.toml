@@ -22,6 +22,7 @@ ring.workspace         = true
 hdrhistogram           = "7.5"
 serde_json.workspace   = true
 common              = { path = "../common" }
+native-app          = { path = "../native-app" }
 tokio.workspace        = true
 # The raw HTTPS request of the path tests, which an HTTP client would normalise.
 rustls                   = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }

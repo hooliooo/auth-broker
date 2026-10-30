@@ -10,14 +10,14 @@ use axum::{
         HeaderMap, HeaderValue, StatusCode,
         header::{CACHE_CONTROL, REFERRER_POLICY, SET_COOKIE},
     },
-    response::{IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use common::{
     causes::with_causes,
     cookie,
     crypto::{constant_time_eq, hash_key},
-    metrics, pkce,
+    loopback, metrics, pkce,
     provider::IdentityProvider,
     random::random_token,
     registry::{App, Site},
@@ -26,6 +26,7 @@ use common::{
 };
 use oidc::oidc::{JwtVerificationError, JwtVerifier};
 use redis::AsyncCommands;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{error, info, warn};
@@ -60,11 +61,14 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/backchannel-logout/{app}", post(backchannel_logout))
 }
 
-/// Query of `/broker/login`, set by the edge.
+/// Query of `/broker/login`, set by the edge, or by a native installation's desktop app.
 #[derive(Deserialize)]
 struct BrokerLoginQuery {
     /// The site signing in.
     site: String,
+    /// For a native installation only: the app's loopback address for this sign-in
+    /// (RFC 8252 §7.3). An edge kind's destination comes from the registry, never the request.
+    redirect_uri: Option<String>,
     /// The edge's own state; returned with the handoff code.
     state: String,
     /// The edge's PKCE challenge; the handoff code is useless without its verifier.
@@ -82,6 +86,9 @@ struct PendingLogin {
     edge_state: String,
     /// The edge's PKCE challenge, for the handoff.
     edge_challenge: String,
+    /// For a native installation: where its app listens for the handoff.
+    #[serde(default)]
+    native_redirect: Option<String>,
     /// The hub's PKCE verifier for the provider.
     verifier: String,
     /// The ID token must carry this nonce.
@@ -153,6 +160,28 @@ async fn broker_login(
     if !signing::is_nonce(&q.state) {
         return Err(AppError::BadRequest("edge state malformed"));
     }
+    // A native app listens on loopback for this sign-in only; an edge's site has its registered
+    // origin, and no request may move it.
+    let native_redirect = match (&app.native, q.redirect_uri.as_deref()) {
+        (Some(native), Some(uri)) => Some(
+            loopback::redirect(uri, &native.redirect_path)
+                .ok_or(AppError::BadRequest(
+                    "redirect_uri must be http://127.0.0.1:<port> or http://[::1]:<port> with the kind's path",
+                ))?
+                .to_string(),
+        ),
+        (Some(_), None) => {
+            return Err(AppError::BadRequest(
+                "a native installation must name its loopback redirect_uri",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(AppError::BadRequest(
+                "an edge's site returns to its registered origin; redirect_uri is not accepted",
+            ));
+        }
+        (None, None) => None,
+    };
 
     // Unauthenticated and writes to Redis, so it is rate limited per client and per site.
     let mut redis = state.redis.clone();
@@ -186,6 +215,7 @@ async fn broker_login(
         site_id: site.id.clone(),
         edge_state: q.state,
         edge_challenge: q.code_challenge,
+        native_redirect,
         verifier: verifier.clone(),
         nonce: nonce.clone(),
     };
@@ -442,8 +472,15 @@ async fn complete_sign_in(
             )
             .await?;
 
-        // The destination comes from the registry, never from the request.
-        let mut target = site.handoff_url();
+        // The destination comes from the registry, never from the request; for a native
+        // installation, the loopback address checked when the sign-in started.
+        let mut target = match pending.native_redirect.as_deref() {
+            Some(uri) => Url::parse(uri)
+                .map_err(|_| AppError::Unauthorized("native redirect unusable"))?,
+            None => site
+                .handoff_url()
+                .ok_or(AppError::Unauthorized("site has no origin to return to"))?,
+        };
         target
             .query_pairs_mut()
             .append_pair("code", &handoff_code)
@@ -501,15 +538,22 @@ async fn exchange_code(
 }
 
 /// `GET /broker/logged-out/{site}`: the provider's post-logout redirect; bounces to the
-/// site's home.
+/// site's home, or for a native installation, which has none, says so in the browser.
 async fn logged_out(
     State(state): State<AppState>,
     Path(site): Path<String>,
-) -> Result<Redirect, AppError> {
+) -> Result<Response, AppError> {
     let catalog = state.runtime.catalog();
     let site = catalog.registry.get(&site).ok_or(AppError::NotFound)?;
-    Ok(Redirect::to(site.home_url().as_str()))
+    Ok(match site.home_url() {
+        Some(home) => Redirect::to(home.as_str()).into_response(),
+        None => Html(SIGNED_OUT_PAGE).into_response(),
+    })
 }
+
+/// What the browser shows after a native installation's sign-out: the app is elsewhere.
+const SIGNED_OUT_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Signed out</title>\
+    <p>You are signed out. You can close this window and return to the application.</p>";
 
 /// Body of `/auth/backchannel-logout/{app}`.
 #[derive(Deserialize)]

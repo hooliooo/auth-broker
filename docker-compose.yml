@@ -87,8 +87,8 @@ services:
       KEYCLOAK_ADMIN: "admin"
       KEYCLOAK_ADMIN_PASSWORD: "test"
       realm: "broker"
-      app_kinds: "inspection billing maintenance"
-      direct_kinds: "inspection maintenance"
+      app_kinds: "inspection billing maintenance planner"
+      direct_kinds: "inspection maintenance planner"
       # The inspection kind's back-channel logout goes through the recorder.
       relay_kind: inspection
       relay_url: http://test-helpers:8000/relay/backchannel-logout

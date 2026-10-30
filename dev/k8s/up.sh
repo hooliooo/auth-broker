@@ -49,7 +49,7 @@ fi
 # The cluster's ports on this machine must be free unless this cluster already holds them. The
 # docker compose stack and auth-api's cluster use some of the same ports: one at a time.
 if command -v kind >/dev/null && ! kind get clusters 2>/dev/null | grep -qx "$cluster"; then
-  for port in 80 443 6380 8091 5290 8181 8182 8183 8184; do
+  for port in 80 443 6380 8091 5290 8181 8182 8183 8184 8185; do
     if command -v lsof >/dev/null && lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
       problems+=("port $port is already in use on this machine (lsof -nP -iTCP:$port -sTCP:LISTEN shows by what); stop it first")
     fi
@@ -179,7 +179,7 @@ restart() { # <deployment>...
 # ready only once the hub answers. Restarted for rebuilt images, new keys and the new realm.
 k -n "$ns" rollout status deployment redis --timeout=120s
 restart test-helpers
-restart api-inspection api-billing api-plant-d api-plant-e
+restart api-inspection api-billing api-plant-d api-plant-e api-planner
 restart hub
 restart edge-inspection edge-billing edge-maintenance
 for certificate in hub-tls edge-inspection-tls edge-billing-tls edge-maintenance-tls; do
@@ -193,6 +193,8 @@ Hub:             https://hub.broker.localhost
 Sites:           https://plant-a.inspection.broker.localhost, plant-b.inspection
                  https://plant-c.billing.broker.localhost
                  https://plant-d.maintenance.broker.localhost, plant-e.maintenance
+Native:          the planner kind's desktop installations plant-f and plant-g (crates/native-app),
+                 calling their API at http://localhost:8185
                  (Chrome and Firefox resolve *.localhost by themselves; Safari does not)
 Admin password:  kubectl --context $ctx -n $ns get secret keycloak-admin -o jsonpath='{.data.password}' | base64 -d
 E2E tests:       cargo test -p e2e --features e2e

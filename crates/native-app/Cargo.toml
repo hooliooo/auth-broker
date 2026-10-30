@@ -1,0 +1,14 @@
+[package]
+name = "native-app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The desktop side of a native installation: sign-in through the system browser with a loopback redirect (RFC 8252), and requests to the hub signed with the installation's key. A stand-in for a real desktop app; the e2e tests drive the same library."
+
+[dependencies]
+common     = { path = "../common", default-features = false }
+reqwest.workspace    = true
+serde.workspace      = true
+serde_json.workspace = true
+thiserror.workspace  = true
+tokio.workspace      = true

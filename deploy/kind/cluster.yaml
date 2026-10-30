@@ -31,3 +31,4 @@ nodes:
       - { containerPort: 30182, hostPort: 8182, listenAddress: "127.0.0.1", protocol: TCP }
       - { containerPort: 30183, hostPort: 8183, listenAddress: "127.0.0.1", protocol: TCP }
       - { containerPort: 30184, hostPort: 8184, listenAddress: "127.0.0.1", protocol: TCP }
+      - { containerPort: 30185, hostPort: 8185, listenAddress: "127.0.0.1", protocol: TCP }

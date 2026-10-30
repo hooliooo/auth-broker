@@ -234,8 +234,12 @@ async fn logout(State(app): State<AppState>, edge: SignedEdge) -> Result<Respons
                 );
             url
         }
-        // Over everywhere already, or the provider has no page to finish it on.
-        _ => edge.site.home_url(),
+        // Over everywhere already, or the provider has no page to finish it on: the site's start
+        // page, or for a native installation the hub's signed-out page.
+        _ => edge
+            .site
+            .home_url()
+            .unwrap_or_else(|| app.config.logged_out_url(&edge.site.id)),
     };
     Ok(no_store(
         Json(LogoutResponse {

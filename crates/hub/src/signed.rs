@@ -1,5 +1,5 @@
 //! Verifies that a request really comes from a kind's edge, for one of the kind's registered,
-//! enabled sites.
+//! enabled sites; or, for a native kind, from the installation itself.
 
 use std::sync::Arc;
 
@@ -12,8 +12,8 @@ use common::{
 
 use crate::{catalog::AppClient, error::AppError, session::now, state::AppState};
 
-/// A request proven to come from `app`'s edge, for `site`. Handlers that take this never see
-/// unsigned traffic.
+/// A request proven to come from `app`'s edge, for `site`, or from native installation `site`
+/// itself. Handlers that take this never see unsigned traffic.
 pub struct SignedEdge {
     /// The site the request is for.
     pub site: Site,
@@ -83,8 +83,13 @@ impl FromRequestParts<AppState> for SignedEdge {
             nonce,
             handle: handle.as_deref(),
         };
-        // The kind's one edge key: only the edge of the site's own kind can speak for it.
-        if !signing::verify(&app.edge_public_key, &input, signature) {
+        // The kind's one edge key, so only the edge of the site's own kind can speak for it;
+        // or a native installation's own keys, so only that installation can.
+        let verified = site
+            .verifying_keys(app)
+            .into_iter()
+            .any(|key| signing::verify(key, &input, signature));
+        if !verified {
             return Err(AppError::Unauthorized("signature invalid"));
         }
 

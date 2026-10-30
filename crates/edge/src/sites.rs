@@ -48,8 +48,12 @@ impl Sites {
             .registry
             .app(app_id)
             .ok_or_else(|| ConfigError::UnknownApp(app_id.to_owned()))?;
-        if parse_public_key(edge_public_key) != Some(app.edge_public_key) {
-            return Err(ConfigError::KeyMismatch(app_id.to_owned()));
+        if app.is_native() {
+            return Err(ConfigError::NativeKind(app_id.to_owned()));
+        }
+        match (parse_public_key(edge_public_key), app.edge_public_key) {
+            (Some(key), Some(registered)) if key == registered => {}
+            _ => return Err(ConfigError::KeyMismatch(app_id.to_owned())),
         }
         Ok(Self {
             app_id: app_id.to_owned(),

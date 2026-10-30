@@ -123,10 +123,6 @@ bash "$(dirname "$0")/sync_organizations.sh"
 # who signs in several times within a second, so each e2e sign-in takes its own user), one with
 # no role at all, and one with every role but no site. Created over the admin REST API,
 # one call per user: kcadm starts a JVM per call.
-if $kcadm get users -r "$realm" -q username=test-user-norole -q exact=true --fields username | grep -q norole; then
-  echo "test users already exist"
-  exit 0
-fi
 pool_size=160
 admin_token=$(curl -sf "$keycloak_url/realms/master/protocol/openid-connect/token" \
   -d grant_type=password -d client_id=admin-cli \
@@ -135,10 +131,6 @@ api() { # <method> <path> [json body]
   curl -sf -o /dev/null -X "$1" "$keycloak_url/admin/realms/$realm$2" \
     -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' ${3:+-d "$3"}
 }
-$kcadm create groups -r "$realm" -s name=test-users >/dev/null
-for kind in $app_kinds; do
-  $kcadm add-roles -r "$realm" --gname test-users --rolename "$kind-user"
-done
 create_user() { # <username> <groups as JSON>
   api POST /users "{\"username\": \"$1\", \"email\": \"$1@example.com\", \"firstName\": \"Site\",
     \"lastName\": \"User\", \"enabled\": true, \"emailVerified\": true, \"groups\": $2,
@@ -152,29 +144,49 @@ organization_id() { # <alias>
   curl -sf "$keycloak_url/admin/realms/$realm/organizations?search=$1&exact=true" \
     -H "Authorization: Bearer $admin_token" | jq -r ".[] | select(.alias == \"$1\") | .id"
 }
-for n in $(seq 1 $pool_size); do
-  create_user "test-user-$n" '["/test-users"]'
-done
-create_user test-user-norole '[]'
-create_user test-user-outsider '["/test-users"]'
+has_members() { # <organization id>
+  [[ "$(curl -sf "$keycloak_url/admin/realms/$realm/organizations/$1/members?max=1" \
+    -H "Authorization: Bearer $admin_token" | jq length)" != 0 ]]
+}
 
-# Memberships, managed per site: every pool user is a member of the inspection sites
-# plant-a, plant-b and plant-limited.
-if [[ " $direct_kinds " == *" inspection "* ]]; then
-  inspection_sites=$(for alias in plant-a plant-b plant-limited; do organization_id "$alias"; done)
+# The users, once; on later runs only what a new kind adds below.
+if $kcadm get users -r "$realm" -q username=test-user-norole -q exact=true --fields username | grep -q norole; then
+  echo "test users already exist"
+else
+  $kcadm create groups -r "$realm" -s name=test-users >/dev/null
   for n in $(seq 1 $pool_size); do
-    id=$(user_id "test-user-$n")
-    for org in $inspection_sites; do api POST "/organizations/$org/members" "\"$id\""; done
+    create_user "test-user-$n" '["/test-users"]'
   done
+  create_user test-user-norole '[]'
+  create_user test-user-outsider '["/test-users"]'
 fi
-# Every pool user is a member of plant-d; the even ones also of plant-e.
+# Every kind's role for the pool, including kinds added since the users were made.
+for kind in $app_kinds; do
+  $kcadm add-roles -r "$realm" --gname test-users --rolename "$kind-user"
+done
+
+# Memberships, managed per site, each only once: added while the site's organization has none.
+# members_of <predicate> <alias>...: every pool user for whom `predicate n` holds joins each site.
+members_of() {
+  local predicate=$1 alias org n; shift
+  for alias in "$@"; do
+    org=$(organization_id "$alias")
+    if [[ -z "$org" ]] || has_members "$org"; then continue; fi
+    echo "members for $alias"
+    for n in $(seq 1 $pool_size); do
+      if "$predicate" "$n"; then api POST "/organizations/$org/members" "\"$(user_id "test-user-$n")\""; fi
+    done
+  done
+}
+every() { true; }
+even() { (( $1 % 2 == 0 )); }
+# Every pool user is a member of the inspection sites plant-a, plant-b and plant-limited; of
+# plant-d, and the even ones also of plant-e; and of the native installations plant-f, plant-g
+# and plant-h.
+if [[ " $direct_kinds " == *" inspection "* ]]; then members_of every plant-a plant-b plant-limited; fi
 if [[ " $direct_kinds " == *" maintenance "* ]]; then
-  plant_d=$(organization_id plant-d)
-  plant_e=$(organization_id plant-e)
-  for n in $(seq 1 $pool_size); do
-    id=$(user_id "test-user-$n")
-    api POST "/organizations/$plant_d/members" "\"$id\""
-    if (( n % 2 == 0 )); then api POST "/organizations/$plant_e/members" "\"$id\""; fi
-  done
+  members_of every plant-d
+  members_of even plant-e
 fi
+if [[ " $direct_kinds " == *" planner "* ]]; then members_of every plant-f plant-g plant-h; fi
 echo "site hub clients ready"

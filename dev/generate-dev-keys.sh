@@ -6,6 +6,8 @@
 #                             assertions against its public half, read from the hub's JWKS URL
 #   keys/edge-<kind>.key      each app kind's edge key (Ed25519): one edge serves all the kind's
 #                             sites
+#   keys/installation-<id>.key  each native installation's key (Ed25519), for its desktop app;
+#                             an installation may list several, e.g. one per workstation
 #   registry/*.json           registry-templates/*.json with each kind's edge public key and its
 #                             sites' origins in the local cluster (https://<site>.<kind>.broker.localhost)
 #   registry-compose/*.json   the same with the docker compose stack's origins
@@ -44,7 +46,8 @@ edge_public_key() {
 
 write_key "$dev/keys/hub-client-key.pem" hub_key
 
-edges=$(grep -ho '"@edge-[a-z0-9-]*@"' "$dev"/registry-templates/*.json | tr -d '"@' | sort -u)
+# Edge keys and native installations' keys, named by their placeholders in the templates.
+edges=$(grep -ho '"@\(edge\|installation\)-[a-z0-9-]*@"' "$dev"/registry-templates/*.json | tr -d '"@' | sort -u)
 for edge in $edges; do
   write_key "$dev/keys/$edge.key" edge_key
 done
@@ -64,9 +67,10 @@ for template in "$dev"/registry-templates/*.json; do
   kind="${name%.json}"
   for target in registry registry-compose; do
     out="$dev/$target/$name"
+    # A native kind's installations have no origin, so no edge port either.
     if [[ "$target" == registry ]]; then
       origin="https://\\1.$kind.broker.localhost"
-    else
+    elif grep -q '@origin:' "$template"; then
       origin="http://\\1.localhost:$(compose_port "$kind")"
     fi
     sed "s|\"@origin:\([a-z0-9-]*\)@\"|\"$origin\"|" "$template" > "$out.tmp"
